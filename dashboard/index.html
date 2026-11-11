@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClinicOS — لوحة تحكم العيادة ومحاكي واتساب التفاعلي</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    @keyframes pulseGlow {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.65; transform: scale(0.98); }
+    }
+    @keyframes slideInUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .msg-enter {
+      animation: slideInUp 0.25s ease-out forwards;
+    }
+    .alert-pulse {
+      animation: pulseGlow 2s infinite;
+    }
+  </style>
+</head>
+<body class="bg-[var(--background)] text-[var(--foreground)] antialiased p-4 select-none">
+
+  <!-- Top Demo Director Bar -->
+  <div class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-3.5 mb-4 shadow-sm flex flex-wrap items-center justify-between gap-3">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold text-lg shadow-sm">
+        🏥
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="font-bold text-base text-[var(--foreground)]">نظام ClinicOS الذكي — عيادة ديمو التخصصية</h1>
+          <span class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/15 text-emerald-600 font-medium border border-emerald-500/30">وضع المحاكاة التفاعلي (Demo Simulator)</span>
+        </div>
+        <p class="text-xs text-[var(--muted-foreground)]">شاشة العرض التفاعلية لتصوير الفيديو (الداشبورد + محاكي واتساب العميل وموظف الاستقبال)</p>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-2">
+      <button id="btnAutoPlay" onclick="runAutoPlayDemo()" class="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5 cursor-pointer">
+        <span>🎬</span>
+        <span id="autoPlayLabel">تشغيل سيناريو الفيديو تلقائياً</span>
+      </button>
+      <button onclick="triggerReminderStep()" class="px-3 py-2 rounded-xl bg-[var(--secondary)] hover: opacity-90 text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium transition cursor-pointer">
+        ⏰ محاكاة تذكير 24 ساعة
+      </button>
+      <button onclick="triggerFollowupStep()" class="px-3 py-2 rounded-xl bg-[var(--secondary)] hover:opacity-90 text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium transition cursor-pointer">
+        💚 محاكاة متابعة بعد الكشف
+      </button>
+      <button onclick="resetDemo()" class="px-3 py-2 rounded-xl bg-[var(--background)] hover:bg-red-500/10 text-[var(--muted-foreground)] hover:text-red-500 border border-[var(--border)] text-xs font-medium transition cursor-pointer">
+        🧹 تصفير العرض
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Split Grid: Dashboard (Left/Main) + WhatsApp Phone (Right) -->
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+
+    <!-- LEFT SIDE: Clinic Reception Dashboard (7 columns) -->
+    <div class="lg:col-span-7 flex flex-col gap-4">
+
+      <!-- KPI Cards -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3.5 shadow-sm">
+          <div class="flex items-center justify-between text-xs text-[var(--muted-foreground)] mb-1">
+            <span>المواعيد المؤكدة</span>
+            <span>📅</span>
+          </div>
+          <div id="kpiBookings" class="text-2xl font-bold text-emerald-600" style="font-variant-numeric: tabular-nums;">0</div>
+          <div class="text-xs text-[var(--muted-foreground)] mt-0.5">حجز فوري عبر واتساب</div>
+        </div>
+
+        <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3.5 shadow-sm">
+          <div class="flex items-center justify-between text-xs text-[var(--muted-foreground)] mb-1">
+            <span>حالة المساعد الذكي</span>
+            <span>🤖</span>
+          </div>
+          <div id="kpiBotStatus" class="text-base font-bold text-emerald-600 mt-1">نشط (يرد تلقائياً)</div>
+          <div id="kpiBotSub" class="text-xs text-[var(--muted-foreground)] mt-1">GPT-4.1 Mini + SQL</div>
+        </div>
+
+        <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3.5 shadow-sm">
+          <div class="flex items-center justify-between text-xs text-[var(--muted-foreground)] mb-1">
+            <span>التذكيرات والمتابعة</span>
+            <span>⏰</span>
+          </div>
+          <div id="kpiLifecycle" class="text-2xl font-bold text-sky-600" style="font-variant-numeric: tabular-nums;">0</div>
+          <div class="text-xs text-[var(--muted-foreground)] mt-0.5">تذكير 24س + اطمئنان</div>
+        </div>
+
+        <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3.5 shadow-sm">
+          <div class="flex items-center justify-between text-xs text-[var(--muted-foreground)] mb-1">
+            <span>تحويل للاستقبال</span>
+            <span>🔔</span>
+          </div>
+          <div id="kpiHandoff" class="text-2xl font-bold text-amber-500" style="font-variant-numeric: tabular-nums;">0</div>
+          <div class="text-xs text-[var(--muted-foreground)] mt-0.5">تنبيه واتساب الموظف</div>
+        </div>
+      </div>
+
+      <!-- Human Handoff Alert Banner (Hidden until triggered) -->
+      <div id="handoffBanner" class="hidden bg-amber-500/10 border-2 border-amber-500/50 rounded-xl p-4 shadow-sm">
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex items-start gap-3">
+            <div class="w-9 h-9 rounded-lg bg-amber-500 text-white flex items-center justify-center text-base font-bold shrink-0 alert-pulse">
+              🔔
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <h3 class="font-bold text-sm text-[var(--foreground)]">تنبيه عاجل لموظف الاستقبال — مريض يحتاج لتدخل بشري</h3>
+                <span class="px-2 py-0.5 text-xs rounded-full bg-amber-500 text-white font-semibold">تم إيقاف البوت مؤقتاً</span>
+              </div>
+              <p class="text-xs text-[var(--muted-foreground)] mt-1">
+                المريض: <strong class="text-[var(--foreground)]">أحمد محمد (+966559900111)</strong> — تم إرسال إشعار فوري إلى واتساب موظف الاستقبال (<span dir="ltr">+966509998877</span>).
+              </p>
+              <p id="handoffReasonText" class="text-xs font-medium text-amber-600 mt-1 bg-[var(--background)] px-2.5 py-1.5 rounded-lg border border-[var(--border)]">
+                آخر رسالة: "عندي ألم شديد في ضرسي ومحتاج أكلم دكتور أو موظف استقبال ضروري"
+              </p>
+            </div>
+          </div>
+          <div class="flex flex-col gap-1.5 shrink-0">
+            <button onclick="switchPhoneTab('staff')" class="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold transition cursor-pointer">
+              📱 عرض واتساب الموظف
+            </button>
+            <button onclick="returnToBot()" class="px-3 py-1.5 rounded-lg bg-[var(--card)] hover:bg-emerald-500/10 text-emerald-600 border border-emerald-500/40 text-xs font-semibold transition cursor-pointer">
+              🔄 إعادة تفعيل البوت
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Appointments Table Card -->
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h2 class="font-bold text-sm text-[var(--foreground)]">📅 جدول المواعيد المحجوزة لحظياً (Live Appointments)</h2>
+            <p class="text-xs text-[var(--muted-foreground)]">يتحدث تلقائياً بمجرد إرسال المريض كلمة "تأكيد" عبر واتساب</p>
+          </div>
+          <span id="pendingBadge" class="hidden px-2.5 py-1 text-xs rounded-full bg-amber-500/15 text-amber-600 border border-amber-500/30 font-medium">
+            ⏳ يوجد اختيار موعد بانتظار تأكيد المريض...
+          </span>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-right border-collapse">
+            <thead>
+              <tr class="border-b border-[var(--border)] text-xs text-[var(--muted-foreground)]">
+                <th class="py-2.5 px-3 font-semibold">المريض</th>
+                <th class="py-2.5 px-3 font-semibold">الخدمة</th>
+                <th class="py-2.5 px-3 font-semibold">الطبيب</th>
+                <th class="py-2.5 px-3 font-semibold">الموعد</th>
+                <th class="py-2.5 px-3 font-semibold">تذكير 24س</th>
+                <th class="py-2.5 px-3 font-semibold">متابعة بعد الزيارة</th>
+                <th class="py-2.5 px-3 font-semibold">الحالة</th>
+              </tr>
+            </thead>
+            <tbody id="appointmentsBody" class="text-xs divide-y divide-[var(--border)]">
+              <tr id="emptyApptRow">
+                <td colspan="7" class="py-8 text-center text-[var(--muted-foreground)]">
+                  لا توجد مواعيد محجوزة حتى الآن — ابدأ المحادثة من شاشة الواتساب على اليسار لتجربة الحجز الفوري
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Live Engine Pipeline Monitor (Shows n8n + Supabase Node Execution) -->
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm">
+        <div class="flex items-center justify-between mb-2.5">
+          <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+            <h2 class="font-bold text-sm text-[var(--foreground)]">⚙️ مسار التنفيذ اللحظي (ClinicOS - Main Engine — 23 Nodes)</h2>
+          </div>
+          <span id="lastExecBadge" class="text-xs text-[var(--muted-foreground)]">جاهز للاستقبال</span>
+        </div>
+
+        <!-- Visual Node Pipeline Bar -->
+        <div class="grid grid-cols-2 sm:grid-cols-6 gap-2 mb-3">
+          <div id="stage-webhook" class="stage-box border border-[var(--border)] bg-[var(--background)] rounded-lg p-2 text-center transition">
+            <div class="text-xs font-bold">1. Webhook & HMAC</div>
+            <div class="text-xs text-[var(--muted-foreground)]">توثيق وحفظ الرسالة</div>
+          </div>
+          <div id="stage-state" class="stage-box border border-[var(--border)] bg-[var(--background)] rounded-lg p-2 text-center transition">
+            <div class="text-xs font-bold">2. Parse & Route</div>
+            <div class="text-xs text-[var(--muted-foreground)]">فحص حالة الحجز</div>
+          </div>
+          <div id="stage-ai" class="stage-box border border-[var(--border)] bg-[var(--background)] rounded-lg p-2 text-center transition">
+            <div class="text-xs font-bold">3. AI Receptionist</div>
+            <div class="text-xs text-[var(--muted-foreground)]">فهم الطلب والرد</div>
+          </div>
+          <div id="stage-slots" class="stage-box border border-[var(--border)] bg-[var(--background)] rounded-lg p-2 text-center transition">
+            <div class="text-xs font-bold">4. Get / Book Slots</div>
+            <div class="text-xs text-[var(--muted-foreground)]">بحث أو تثبيت الموعد</div>
+          </div>
+          <div id="stage-timer" class="stage-box border border-[var(--border)] bg-[var(--background)] rounded-lg p-2 text-center transition">
+            <div class="text-xs font-bold">5. Reminder & Followup</div>
+            <div class="text-xs text-[var(--muted-foreground)]">تذكير ومتابعة تلقائية</div>
+          </div>
+          <div id="stage-outbox" class="stage-box border border-[var(--border)] bg-[var(--background)] rounded-lg p-2 text-center transition">
+            <div class="text-xs font-bold">6. Outbox Dispatch</div>
+            <div class="text-xs text-[var(--muted-foreground)]">إرسال واتساب آمن</div>
+          </div>
+        </div>
+
+        <!-- Activity Log Feed -->
+        <div id="engineLog" class="bg-[var(--background)] border border-[var(--border)] rounded-lg p-2.5 h-32 overflow-y-auto space-y-1.5 text-xs font-mono">
+          <div class="text-[var(--muted-foreground)]">[System] ClinicOS - Main Engine (YOUR_WORKFLOW_ID) جاهز ومربوط بـ Supabase...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT SIDE: Interactive WhatsApp Simulator (5 columns) -->
+    <div class="lg:col-span-5 flex flex-col gap-3">
+
+      <!-- Phone Switcher Tabs (Patient WhatsApp vs Staff WhatsApp) -->
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-1.5 flex items-center gap-1.5 shadow-sm">
+        <button id="tabPatientBtn" onclick="switchPhoneTab('patient')" class="flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-emerald-600 text-white transition flex items-center justify-center gap-1.5 cursor-pointer">
+          <span>📱</span>
+          <span>واتساب المريض (أحمد محمد)</span>
+        </button>
+        <button id="tabStaffBtn" onclick="switchPhoneTab('staff')" class="flex-1 py-2 px-3 rounded-lg text-xs font-bold text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition flex items-center justify-center gap-1.5 cursor-pointer relative">
+          <span>🔔</span>
+          <span>واتساب موظف الاستقبال</span>
+          <span id="staffUnreadBadge" class="hidden px-1.5 py-0.2 rounded-full bg-red-500 text-white text-xs font-bold">1</span>
+        </button>
+      </div>
+
+      <!-- WhatsApp Phone Frame -->
+      <div class="bg-[var(--card)] border-2 border-[var(--border)] rounded-3xl overflow-hidden shadow-md flex flex-col" style="height: 540px;">
+
+        <!-- WhatsApp Green Header -->
+        <div id="waHeader" class="bg-emerald-700 text-white px-4 py-3 flex items-center justify-between shrink-0">
+          <div class="flex items-center gap-3">
+            <div id="waAvatar" class="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-lg font-bold">
+              🦷
+            </div>
+            <div>
+              <div id="waHeaderTitle" class="font-bold text-sm">عيادة ديمو التخصصية (Demo Clinic)</div>
+              <div id="waHeaderStatus" class="text-xs text-emerald-100">متصل الآن • المساعد الذكي للعيادة</div>
+            </div>
+          </div>
+          <div class="text-xs bg-white/15 px-2.5 py-1 rounded-full font-mono" dir="ltr">
+            +966 55 990 0111
+          </div>
+        </div>
+
+        <!-- Patient Chat Container -->
+        <div id="patientChatBox" class="flex-1 p-3.5 overflow-y-auto space-y-2.5 bg-[var(--background)]">
+          <div class="text-center my-1">
+            <span class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--border)] text-xs text-[var(--muted-foreground)]">
+              🔒 الرسائل مؤمنة بتوقيع Meta HMAC-SHA256 ومرتبطة بـ ClinicOS
+            </span>
+          </div>
+        </div>
+
+        <!-- Reception Staff Chat Container (Hidden by default) -->
+        <div id="staffChatBox" class="hidden flex-1 p-3.5 overflow-y-auto space-y-2.5 bg-[var(--background)]">
+          <div class="text-center my-1">
+            <span class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--border)] text-xs text-[var(--muted-foreground)]">
+              🔔 شاشة موبايل موظف الاستقبال (<span dir="ltr">+966509998877</span>) — تستقبل تنبيهات الطوارئ والتحويل البشري
+            </span>
+          </div>
+          <div id="staffEmptyHint" class="text-center py-16 text-xs text-[var(--muted-foreground)]">
+            لا توجد تنبيهات تحويل بشري حتى الآن.
+          </div>
+        </div>
+
+        <!-- Typing Indicator -->
+        <div id="typingIndicator" class="hidden px-4 py-1.5 bg-[var(--background)] text-xs text-emerald-600 font-medium flex items-center gap-1.5">
+          <span>💬</span>
+          <span>جاري معالجة الرسالة في ClinicOS...</span>
+        </div>
+
+        <!-- Quick Scenario Chips for Video Recording -->
+        <div class="px-3 py-2 bg-[var(--card)] border-t border-[var(--border)] flex items-center gap-1.5 overflow-x-auto shrink-0">
+          <span class="text-xs text-[var(--muted-foreground)] shrink-0 font-semibold">رسائل سريعة:</span>
+          <button onclick="sendStepMessage(1)" class="px-2.5 py-1 rounded-full bg-[var(--secondary)] hover:opacity-85 text-[var(--secondary-foreground)] border border-[var(--border)] text-xs shrink-0 transition cursor-pointer">
+            1️⃣ استفسار عن المواعيد والخدمات
+          </button>
+          <button onclick="sendStepMessage(2)" class="px-2.5 py-1 rounded-full bg-[var(--secondary)] hover:opacity-85 text-[var(--secondary-foreground)] border border-[var(--border)] text-xs shrink-0 transition cursor-pointer">
+            2️⃣ طلب حجز فحص أسنان الأحد
+          </button>
+          <button onclick="sendStepMessage(3)" class="px-2.5 py-1 rounded-full bg-[var(--secondary)] hover:opacity-85 text-[var(--secondary-foreground)] border border-[var(--border)] text-xs shrink-0 transition cursor-pointer">
+            3️⃣ اختيار رقم "1"
+          </button>
+          <button onclick="sendStepMessage(4)" class="px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-600 border border-emerald-500/30 font-semibold text-xs shrink-0 transition cursor-pointer">
+            4️⃣ إرسال "تأكيد"
+          </button>
+          <button onclick="sendStepMessage(5)" class="px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-600 border border-amber-500/30 font-semibold text-xs shrink-0 transition cursor-pointer">
+            5️⃣ شكوى ألم وتحويل للموظف
+          </button>
+        </div>
+
+        <!-- WhatsApp Input Bar -->
+        <form onsubmit="handleChatSubmit(event)" class="p-2.5 bg-[var(--card)] border-t border-[var(--border)] flex items-center gap-2 shrink-0">
+          <input
+            id="chatInput"
+            type="text"
+            placeholder="اكتب رسالة العميل هنا أو اضغط على الأزرار السريعة..."
+            class="flex-1 bg-[var(--background)] text-[var(--foreground)] border border-[var(--border)] rounded-full px-4 py-2 text-xs focus:outline-none focus:border-emerald-500"
+          />
+          <button
+            type="submit"
+            class="w-9 h-9 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center text-sm font-bold shadow-sm transition cursor-pointer shrink-0"
+            title="إرسال"
+          >
+            ➤
+          </button>
+        </form>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const state = {
+      currentTab: 'patient',
+      conversationStatus: 'bot',
+      pendingBooking: null,
+      appointments: [],
+      lifecycleCount: 0,
+      handoffCount: 0,
+      autoPlaying: false
+    };
+
+    const AVAILABLE_SLOTS = [
+      { index: 1, label: 'الأحد، ٠٨ نوفمبر، ١٠:٠٠ ص', date: '2026-11-08', time: '10:00 ص', doctor: 'Dr. Layan Alharbi (د. ليان الحربي)', service: 'فحص الأسنان' },
+      { index: 2, label: 'الأحد، ٠٨ نوفمبر، ١٠:٣٠ ص', date: '2026-11-08', time: '10:30 ص', doctor: 'Dr. Layan Alharbi (د. ليان الحربي)', service: 'فحص الأسنان' }
+    ];
+
+    function nowTimeStr() {
+      return new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit' }).format(new Date());
+    }
+
+    function logEngine(stageId, text, execLabel) {
+      document.querySelectorAll('.stage-box').forEach(el => {
+        el.className = 'stage-box border border-[var(--border)] bg-[var(--background)] rounded-lg p-2 text-center transition';
+      });
+      if (stageId) {
+        const active = document.getElementById(stageId);
+        if (active) {
+          active.className = 'stage-box border-2 border-emerald-500 bg-emerald-500/10 rounded-lg p-2 text-center transition font-semibold';
+        }
+      }
+      if (execLabel) {
+        document.getElementById('lastExecBadge').textContent = execLabel;
+      }
+      const logBox = document.getElementById('engineLog');
+      const line = document.createElement('div');
+      line.className = 'text-[var(--foreground)]';
+      line.textContent = `[${nowTimeStr()}] ${text}`;
+      logBox.appendChild(line);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function appendMessage(target, sender, text, tagLabel) {
+      const box = document.getElementById(target === 'staff' ? 'staffChatBox' : 'patientChatBox');
+      if (target === 'staff') {
+        const hint = document.getElementById('staffEmptyHint');
+        if (hint) hint.classList.add('hidden');
+      }
+
+      const wrapper = document.createElement('div');
+      const isUser = sender === 'patient';
+      wrapper.className = `flex flex-col ${isUser ? 'items-start' : 'items-end'} msg-enter`;
+
+      const bubble = document.createElement('div');
+      bubble.className = isUser
+        ? 'max-w-[85%] rounded-2xl rounded-tr-sm px-3.5 py-2.5 bg-emerald-600 text-white text-xs leading-relaxed shadow-sm whitespace-pre-line'
+        : 'max-w-[85%] rounded-2xl rounded-tl-sm px-3.5 py-2.5 bg-[var(--card)] text-[var(--foreground)] border border-[var(--border)] text-xs leading-relaxed shadow-sm whitespace-pre-line';
+
+      if (tagLabel) {
+        const badge = document.createElement('div');
+        badge.className = 'text-xs font-bold text-emerald-500 mb-1';
+        badge.textContent = tagLabel;
+        bubble.appendChild(badge);
+      }
+
+      const bodySpan = document.createElement('div');
+      bodySpan.textContent = text;
+      bubble.appendChild(bodySpan);
+
+      const meta = document.createElement('div');
+      meta.className = `text-xs mt-1 flex items-center gap-1 ${isUser ? 'text-emerald-100' : 'text-[var(--muted-foreground)]'}`;
+      meta.innerHTML = `<span>${nowTimeStr()}</span><span>✓✓</span>`;
+      bubble.appendChild(meta);
+
+      wrapper.appendChild(bubble);
+      box.appendChild(wrapper);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function renderDashboard() {
+      document.getElementById('kpiBookings').textContent = String(state.appointments.length);
+      document.getElementById('kpiLifecycle').textContent = String(state.lifecycleCount);
+      document.getElementById('kpiHandoff').textContent = String(state.handoffCount);
+
+      const botStatus = document.getElementById('kpiBotStatus');
+      const botSub = document.getElementById('kpiBotSub');
+      if (state.conversationStatus === 'human') {
+        botStatus.textContent = 'متوقف مؤقتاً (مع الموظف)';
+        botStatus.className = 'text-base font-bold text-amber-500 mt-1';
+        botSub.textContent = 'تم تحويل المحادثة للاستقبال';
+      } else {
+        botStatus.textContent = 'نشط (يرد تلقائياً)';
+        botStatus.className = 'text-base font-bold text-emerald-600 mt-1';
+        botSub.textContent = 'GPT-4.1 Mini + SQL';
+      }
+
+      const pendingBadge = document.getElementById('pendingBadge');
+      if (state.pendingBooking) {
+        pendingBadge.classList.remove('hidden');
+      } else {
+        pendingBadge.classList.add('hidden');
+      }
+
+      const tbody = document.getElementById('appointmentsBody');
+      if (state.appointments.length === 0) {
+        tbody.innerHTML = `
+          <tr id="emptyApptRow">
+            <td colspan="7" class="py-8 text-center text-[var(--muted-foreground)]">
+              لا توجد مواعيد محجوزة حتى الآن — ابدأ المحادثة من شاشة الواتساب على اليسار لتجربة الحجز الفوري
+            </td>
+          </tr>`;
+        return;
+      }
+
+      tbody.innerHTML = state.appointments.map(appt => `
+        <tr class="msg-enter bg-emerald-500/5">
+          <td class="py-3 px-3 font-bold">${appt.patient}</td>
+          <td class="py-3 px-3">${appt.service}</td>
+          <td class="py-3 px-3">${appt.doctor}</td>
+          <td class="py-3 px-3 font-mono">${appt.date} (${appt.time})</td>
+          <td class="py-3 px-3">
+            ${appt.reminderSent
+              ? '<span class="px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-600 font-semibold">تم الإرسال ✅</span>'
+              : '<span class="px-2 py-0.5 rounded-full bg-[var(--secondary)] text-[var(--muted-foreground)]">مجدول تلقائياً</span>'}
+          </td>
+          <td class="py-3 px-3">
+            ${appt.followupSent
+              ? '<span class="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 font-semibold">تمت المتابعة 💚</span>'
+              : '<span class="px-2 py-0.5 rounded-full bg-[var(--secondary)] text-[var(--muted-foreground)]">بعد الزيارة بـ 2س</span>'}
+          </td>
+          <td class="py-3 px-3">
+            <span class="px-2.5 py-0.5 rounded-full bg-emerald-600 text-white font-semibold">مؤكد ✓</span>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function switchPhoneTab(tab) {
+      state.currentTab = tab;
+      const pBtn = document.getElementById('tabPatientBtn');
+      const sBtn = document.getElementById('tabStaffBtn');
+      const pBox = document.getElementById('patientChatBox');
+      const sBox = document.getElementById('staffChatBox');
+      const title = document.getElementById('waHeaderTitle');
+      const status = document.getElementById('waHeaderStatus');
+      const avatar = document.getElementById('waAvatar');
+
+      if (tab === 'staff') {
+        sBtn.className = 'flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-amber-500 text-white transition flex items-center justify-center gap-1.5 cursor-pointer relative';
+        pBtn.className = 'flex-1 py-2 px-3 rounded-lg text-xs font-bold text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition flex items-center justify-center gap-1.5 cursor-pointer';
+        pBox.classList.add('hidden');
+        sBox.classList.remove('hidden');
+        title.textContent = 'تنبيهات استقبال العيادة (Staff Alert)';
+        status.textContent = 'رقم موظف الاستقبال • إشعارات التحويل الفورية';
+        avatar.textContent = '🔔';
+        document.getElementById('staffUnreadBadge').classList.add('hidden');
+      } else {
+        pBtn.className = 'flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-emerald-600 text-white transition flex items-center justify-center gap-1.5 cursor-pointer';
+        sBtn.className = 'flex-1 py-2 px-3 rounded-lg text-xs font-bold text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition flex items-center justify-center gap-1.5 cursor-pointer relative';
+        sBox.classList.add('hidden');
+        pBox.classList.remove('hidden');
+        title.textContent = 'عيادة ديمو التخصصية (Demo Clinic)';
+        status.textContent = 'متصل الآن • المساعد الذكي للعيادة';
+        avatar.textContent = '🦷';
+      }
+    }
+
+    function sleep(ms) {
+      return new Promise(r => setTimeout(r, ms));
+    }
+
+    async function processPatientMessage(rawText) {
+      const text = rawText.trim();
+      if (!text) return;
+
+      switchPhoneTab('patient');
+      appendMessage('patient', 'patient', text);
+      const indicator = document.getElementById('typingIndicator');
+      indicator.classList.remove('hidden');
+
+      logEngine('stage-webhook', `Verify & Save Event: تم التحقق من توقيع HMAC وحفظ رسالة العميل "${text.slice(0, 28)}..."`, 'جاري التنفيذ...');
+      await sleep(350);
+
+      if (state.conversationStatus === 'human') {
+        logEngine('stage-state', 'Parse Turn & State: المحادثة في وضع (human) — تم حفظ الرسالة لموظف الاستقبال بدون تدخل البوت.', 'Status: Human Mode');
+        indicator.classList.add('hidden');
+        return;
+      }
+
+      const confirms = ['تأكيد', 'تاكيد', 'نعم', 'موافق', 'confirm', 'yes'];
+      const cancels = ['إلغاء', 'الغاء', 'لا', 'cancel', 'no'];
+
+      // Check if confirming a selected slot
+      if (state.pendingBooking && state.pendingBooking.selectedSlot && confirms.includes(text.toLowerCase())) {
+        logEngine('stage-state', 'Route Turn ➔ Confirm Slot: العميل أرسل تأكيد صريح للحجز.', 'Execution #124');
+        await sleep(350);
+        logEngine('stage-slots', 'Book Slot (PostgreSQL): تنفيذ public.book_appointment() وتثبيت الموعد ومسح pending_booking.', 'Execution #124');
+        await sleep(350);
+
+        const slot = state.pendingBooking.selectedSlot;
+        state.appointments.unshift({
+          id: '0fd8653a-21cc-4133-bfe9-5790bdfa80da',
+          patient: 'أحمد محمد (+966559900111)',
+          service: slot.service,
+          doctor: slot.doctor,
+          date: slot.date,
+          time: slot.time,
+          reminderSent: false,
+          followupSent: false
+        });
+        state.pendingBooking = null;
+        renderDashboard();
+
+        logEngine('stage-outbox', 'Claim Outbox ➔ Build WhatsApp Payload: إرسال رسالة تأكيد الحجز للعميل.', 'Execution #124 (Success ✓)');
+        indicator.classList.add('hidden');
+        appendMessage(
+          'patient',
+          'bot',
+          `تم تأكيد موعد ${slot.service} مع Dr. Layan Alharbi بتاريخ ${slot.date} الساعة 10:00.`,
+          '✅ تأكيد حجز فوري'
+        );
+        return;
+      }
+
+      // Check if selecting slot number (1 or 2)
+      if (state.pendingBooking && !state.pendingBooking.selectedSlot && /^[12١٢]$/.test(text)) {
+        const idx = (text === '2' || text === '٢') ? 1 : 0;
+        const chosen = AVAILABLE_SLOTS[idx];
+        state.pendingBooking.selectedSlot = chosen;
+
+        logEngine('stage-state', `Parse Turn & State (Direct Reply): تم اختيار الموعد رقم (${idx + 1}) بدون استهلاك OpenAI.`, 'Execution #123 (1.9s ✓)');
+        await sleep(350);
+        logEngine('stage-outbox', 'Save State & Enqueue ➔ Claim Outbox: طلب التأكيد النهائي من المريض.', 'Execution #123 (Success ✓)');
+        indicator.classList.add('hidden');
+        appendMessage(
+          'patient',
+          'bot',
+          `اخترت موعد ٠٨‏/١١‏/٢٠٢٦، ${chosen.time}. الموعد لسه مش محجوز. ابعت تأكيد عشان أسجله، أو إلغاء للتراجع.`
+        );
+        return;
+      }
+
+      // Check if cancelling pending selection
+      if (state.pendingBooking && cancels.includes(text.toLowerCase())) {
+        state.pendingBooking = null;
+        renderDashboard();
+        logEngine('stage-state', 'Parse Turn & State: تم إلغاء طلب الموعد المعلق بناءً على رغبة المريض.', 'Cancelled Pending');
+        indicator.classList.add('hidden');
+        appendMessage('patient', 'bot', 'تم إلغاء طلب الموعد المعلّق، ومكانش فيه حجز مسجّل.');
+        return;
+      }
+
+      // Medical / Human handoff detection
+      if (text.includes('ألم') || text.includes('الم') || text.includes('ضرسي') || text.includes('موظف') || text.includes('دكتور')) {
+        logEngine('stage-ai', 'AI Receptionist (GPT-4.1-mini): تصنيف الرسالة intent="human_handoff" (needs_human=true).', 'Execution #126');
+        await sleep(450);
+        logEngine('stage-outbox', 'Save State & Enqueue: تحويل المحادثة لـ human + إرسال تنبيه واتساب لموظف الاستقبال (+966509998877).', 'Execution #126 (Success ✓)');
+
+        state.conversationStatus = 'human';
+        state.handoffCount += 1;
+        state.pendingBooking = null;
+        document.getElementById('handoffReasonText').textContent = `آخر رسالة: "${text}"`;
+        document.getElementById('handoffBanner').classList.remove('hidden');
+        document.getElementById('staffUnreadBadge').classList.remove('hidden');
+        renderDashboard();
+
+        indicator.classList.add('hidden');
+        appendMessage(
+          'patient',
+          'bot',
+          'الطلب ده محتاج مراجعة من فريق العيادة. تم إبلاغ موظف الاستقبال على واتساب وهيتواصل معاك في أقرب وقت.',
+          '🔔 تحويل لموظف الاستقبال'
+        );
+        appendMessage(
+          'staff',
+          'bot',
+          `🔔 تنبيه استقبال العيادة: المريض أحمد محمد (+966559900111) يحتاج لتدخل بشري.\nآخر رسالة: ${text}`,
+          '🚨 إشعار طوارئ للاستقبال'
+        );
+        return;
+      }
+
+      // Booking request detection
+      if (text.includes('احجز') || text.includes('حجز') || text.includes('موعد فحص') || text.includes('تنظيف') || text.includes('جلدية') || text.includes('ليزر')) {
+        logEngine('stage-ai', 'AI Receptionist: استخراج intent="booking_request", service="DENTAL_CHECKUP", date="2026-11-08".', 'Execution #122');
+        await sleep(450);
+        logEngine('stage-slots', 'Get Slots (PostgreSQL): جلب المواعيد المتاحة لـ Dr. Layan Alharbi وحفظ pending_booking.', 'Execution #122');
+        await sleep(350);
+        logEngine('stage-outbox', 'Claim Outbox ➔ Build WhatsApp Payload: إرسال قائمة المواعيد المتاحة للمريض.', 'Execution #122 (Success ✓)');
+
+        state.pendingBooking = { availableSlots: AVAILABLE_SLOTS, selectedSlot: null };
+        renderDashboard();
+
+        indicator.classList.add('hidden');
+        appendMessage(
+          'patient',
+          'bot',
+          'المواعيد المتاحة حاليًا:\n1) الأحد، ٠٨ نوفمبر، ١٠:٠٠ ص\n2) الأحد، ٠٨ نوفمبر، ١٠:٣٠ ص\nابعت رقم الموعد المناسب، وبعدها هطلب تأكيدك الصريح قبل ما أسجل الحجز.',
+          '📅 المواعيد المتاحة من قاعدة البيانات'
+        );
+        return;
+      }
+
+      // Default FAQ response
+      logEngine('stage-ai', 'Load Clinic Context ➔ AI Receptionist: تصنيف الرسالة intent="faq" (confidence: 0.95).', 'Execution #121');
+      await sleep(450);
+      logEngine('stage-outbox', 'Claim Outbox ➔ Build WhatsApp Payload: إرسال الرد التلقائي للمريض.', 'Execution #121 (Success ✓)');
+      indicator.classList.add('hidden');
+      appendMessage(
+        'patient',
+        'bot',
+        'ساعات العمل في العيادة من الأحد إلى الخميس، من الساعة 10 صباحًا حتى 6 مساءً. الخدمات المتاحة لدينا تشمل: فحص الأسنان، تنظيف الأسنان، استشارة جلدية، وجلسة ليزر.',
+        '🤖 المساعد الذكي (AI Receptionist)'
+      );
+    }
+
+    function sendStepMessage(step) {
+      const messages = {
+        1: 'السلام عليكم، مواعيد العمل إمتى وإيه الخدمات المتاحة عندكم؟',
+        2: 'عايز احجز موعد فحص الأسنان يوم الأحد الجاي الصبح',
+        3: '1',
+        4: 'تأكيد',
+        5: 'عندي ألم شديد في ضرسي ومحتاج أكلم دكتور أو موظف استقبال ضروري'
+      };
+      if (step !== 5 && state.conversationStatus === 'human') {
+        returnToBot();
+      }
+      processPatientMessage(messages[step]);
+    }
+
+    function handleChatSubmit(e) {
+      e.preventDefault();
+      const input = document.getElementById('chatInput');
+      const val = input.value;
+      input.value = '';
+      processPatientMessage(val);
+    }
+
+    async function triggerReminderStep() {
+      switchPhoneTab('patient');
+      if (state.appointments.length === 0) {
+        state.appointments.unshift({
+          id: '0fd8653a-21cc-4133-bfe9-5790bdfa80da',
+          patient: 'أحمد محمد (+966559900111)',
+          service: 'فحص الأسنان',
+          doctor: 'Dr. Layan Alharbi (د. ليان الحربي)',
+          date: '2026-11-08',
+          time: '10:00 ص',
+          reminderSent: false,
+          followupSent: false
+        });
+      }
+      logEngine('stage-timer', 'Reminder & Outbox Timer: فحص المواعيد القادمة خلال 24 ساعة وتوليد رسالة التذكير تلقائياً.', 'Timer Sweep');
+      await sleep(300);
+      state.appointments[0].reminderSent = true;
+      state.lifecycleCount += 1;
+      renderDashboard();
+
+      logEngine('stage-outbox', 'Claim Outbox ➔ Build WhatsApp Payload: تم إرسال تذكير الـ 24 ساعة للمريض.', 'Execution #124 (Reminder Sent ✓)');
+      appendMessage(
+        'patient',
+        'bot',
+        'تذكير بموعدك: فحص الأسنان مع Dr. Layan Alharbi بتاريخ 2026-11-08 الساعة 10:00. نتطلع لرؤيتك!',
+        '⏰ تذكير تلقائي قبل الموعد بـ 24 ساعة'
+      );
+    }
+
+    async function triggerFollowupStep() {
+      switchPhoneTab('patient');
+      if (state.appointments.length === 0) {
+        state.appointments.unshift({
+          id: '0fd8653a-21cc-4133-bfe9-5790bdfa80da',
+          patient: 'أحمد محمد (+966559900111)',
+          service: 'فحص الأسنان',
+          doctor: 'Dr. Layan Alharbi (د. ليان الحربي)',
+          date: '2026-11-08',
+          time: '10:00 ص',
+          reminderSent: true,
+          followupSent: false
+        });
+      }
+      logEngine('stage-timer', 'Reminder & Outbox Timer: اكتشاف انتهاء الكشف منذ ساعتين وتوليد رسالة الاطمئنان.', 'Execution #125');
+      await sleep(300);
+      state.appointments[0].followupSent = true;
+      state.lifecycleCount += 1;
+      renderDashboard();
+
+      logEngine('stage-outbox', 'Claim Outbox ➔ Build WhatsApp Payload: تم إرسال رسالة المتابعة بعد الزيارة.', 'Execution #125 (Follow-up Sent ✓)');
+      appendMessage(
+        'patient',
+        'bot',
+        'حمداً لله على سلامتك! نتمنى أن تكون زيارتك لـ فحص الأسنان مع Dr. Layan Alharbi كانت مريحة. لو عندك أي استفسار إحنا في خدمتك دائماً.',
+        '💚 متابعة تلقائية بعد انتهاء الزيارة بساعتين'
+      );
+    }
+
+    function returnToBot() {
+      state.conversationStatus = 'bot';
+      document.getElementById('handoffBanner').classList.add('hidden');
+      renderDashboard();
+      logEngine('stage-state', 'public.update_conversation(status="bot"): تم إعادة تفعيل المساعد الذكي للمريض.', 'Bot Resumed ✓');
+    }
+
+    function resetDemo() {
+      state.conversationStatus = 'bot';
+      state.pendingBooking = null;
+      state.appointments = [];
+      state.lifecycleCount = 0;
+      state.handoffCount = 0;
+      state.autoPlaying = false;
+      document.getElementById('autoPlayLabel').textContent = 'تشغيل سيناريو الفيديو تلقائياً';
+      document.getElementById('handoffBanner').classList.add('hidden');
+      document.getElementById('staffUnreadBadge').classList.add('hidden');
+      document.getElementById('patientChatBox').innerHTML = `
+        <div class="text-center my-1">
+          <span class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--border)] text-xs text-[var(--muted-foreground)]">
+            🔒 الرسائل مؤمنة بتوقيع Meta HMAC-SHA256 ومرتبطة بـ ClinicOS
+          </span>
+        </div>`;
+      document.getElementById('staffChatBox').innerHTML = `
+        <div class="text-center my-1">
+          <span class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--border)] text-xs text-[var(--muted-foreground)]">
+            🔔 شاشة موبايل موظف الاستقبال (<span dir="ltr">+966509998877</span>) — تستقبل تنبيهات الطوارئ والتحويل البشري
+          </span>
+        </div>
+        <div id="staffEmptyHint" class="text-center py-16 text-xs text-[var(--muted-foreground)]">
+          لا توجد تنبيهات تحويل بشري حتى الآن.
+        </div>`;
+      document.getElementById('engineLog').innerHTML = `
+        <div class="text-[var(--muted-foreground)]">[System] تم تصفير العرض — جاهز لتصوير الفيديو من البداية...</div>`;
+      switchPhoneTab('patient');
+      renderDashboard();
+      logEngine(null, 'تمت إعادة ضبط المحاكي ولوحة التحكم بنجاح.', 'جاهز للعرض');
+    }
+
+    async function runAutoPlayDemo() {
+      if (state.autoPlaying) return;
+      resetDemo();
+      state.autoPlaying = true;
+      document.getElementById('autoPlayLabel').textContent = '⏳ جاري تشغيل السيناريو...';
+
+      await sleep(600);
+      await processPatientMessage('السلام عليكم، مواعيد العمل إمتى وإيه الخدمات المتاحة عندكم؟');
+      if (!state.autoPlaying) return;
+
+      await sleep(2200);
+      await processPatientMessage('عايز احجز موعد فحص الأسنان يوم الأحد الجاي الصبح');
+      if (!state.autoPlaying) return;
+
+      await sleep(2200);
+      await processPatientMessage('1');
+      if (!state.autoPlaying) return;
+
+      await sleep(2000);
+      await processPatientMessage('تأكيد');
+      if (!state.autoPlaying) return;
+
+      await sleep(2200);
+      await triggerReminderStep();
+      if (!state.autoPlaying) return;
+
+      await sleep(2200);
+      await triggerFollowupStep();
+      if (!state.autoPlaying) return;
+
+      await sleep(2200);
+      await processPatientMessage('عندي ألم شديد في ضرسي ومحتاج أكلم دكتور أو موظف استقبال ضروري');
+
+      state.autoPlaying = false;
+      document.getElementById('autoPlayLabel').textContent = '🎬 إعادة تشغيل سيناريو الفيديو';
+    }
+  </script>
+</body>
+</html>
