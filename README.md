@@ -7,6 +7,7 @@
 # 🏥 ClinicOS `v3.3` — Production-Grade WhatsApp AI Receptionist & Appointment Engine
 ### منظومة الاستقبال الذكي وإدارة حجوزات العيادات عبر واتساب بالصوت والنص
 
+[![Watch Live Demo](https://img.shields.io/badge/YouTube-Watch_Live_Demo_Video-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://youtu.be/YoO-eJfvpjM)
 [![n8n Workflow Engine](https://img.shields.io/badge/n8n-30--Node_Hybrid_Engine_v3.3-ea4b71?style=for-the-badge&logo=n8n&logoColor=white)](./workflow/clinicos-main-engine.json)
 [![OpenAI GPT-4.1](https://img.shields.io/badge/OpenAI-GPT--4.1-10a37f?style=for-the-badge&logo=openai&logoColor=white)](./prompts/receptionist-system-prompt.xml)
 [![Voice Transcription](https://img.shields.io/badge/Audio-gpt--4o--transcribe-f59e0b?style=for-the-badge&logo=openai&logoColor=white)](./prompts/voice-transcription-prompts.md)
@@ -200,6 +201,20 @@ node tests/test_270_messages.js
 ---
 
 ## 🎥 Visual Walkthrough | استعراض النظام بالصور والفيديو
+
+<div align="center">
+
+### ▶️ [شاهد الفيديو الكامل لاختبار النظام الحي (9 مراحل متتالية على واتساب وقاعدة البيانات) — Watch Full Live Demo on YouTube](https://youtu.be/YoO-eJfvpjM)
+
+[![ClinicOS Full Live Demo Video on YouTube](https://img.shields.io/badge/▶️_Watch_Full_Live_Stress--Test_Demo_(3m_52s)-YouTube_HD-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://youtu.be/YoO-eJfvpjM)
+
+<a href="https://youtu.be/YoO-eJfvpjM" target="_blank">
+  <img src="https://img.youtube.com/vi/YoO-eJfvpjM/maxresdefault.jpg" alt="Watch ClinicOS Live Demo on YouTube" width="90%" />
+</a>
+
+</div>
+
+<br />
 
 | 1️⃣ Voice Note & Live Slot Search | 2️⃣ Instant Database Confirmation | 3️⃣ Smart Human Handoff (`status = human`) |
 | :---: | :---: | :---: |
