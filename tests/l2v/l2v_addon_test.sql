@@ -156,6 +156,48 @@ begin
   assert (select sum(no_shows) from l2v.kpi_daily(v_clinic, current_date - 1, current_date + 1)) = 1, 'kpi sees the no-show';
   assert (select max(avg_first_reply_s) from l2v.kpi_daily(v_clinic, current_date - 1, current_date + 1)) = 8, 'first reply = 8s';
 
+  -- 10. T2: capture_lead_guarded and qualify_contact (5 cases)
+  -- Case 1: happy path (new patient captured via referral, then qualified via qualify_contact)
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201555555555', 'Hana') returning id into v_p2;
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_clinic, v_p2, 'click_to_whatsapp', 'camp_t2', '{"source_id":"ad_t2"}'::jsonb);
+  assert v_lead is not null and v_new, 'T2 happy path: capture_lead_guarded creates open lead';
+  select * into v_q from l2v.qualify_contact(v_clinic, v_p2, 'high', 'now', 'veneers');
+  assert v_q.status = 'hot' and v_q.score = 100 and v_q.assignment_id is not null,
+    'T2 happy path: qualify_contact scores hot and assigns';
+  assert (select treatment_interest from l2v.leads where id = v_lead) = 'veneers',
+    'T2 happy path: qualify_contact updates treatment';
+
+  -- Case 2: no open lead -> qualify_contact returns no row and does not raise
+  update l2v.leads set status = 'closed' where id = v_lead;
+  select count(*) into v_cnt from l2v.qualify_contact(v_clinic, v_p2, 'high', 'now', 'veneers');
+  assert v_cnt = 0, 'T2 no open lead: qualify_contact returns 0 rows, got ' || v_cnt;
+
+  -- Case 3: staff -> capture_lead_guarded returns no row (rep & manager) instead of raising
+  select count(*) into v_cnt
+    from l2v.capture_lead_guarded(v_clinic, v_rep1, 'click_to_whatsapp', 'camp_staff', '{"source_id":"ad_staff"}'::jsonb);
+  assert v_cnt = 0, 'T2 staff (rep): capture_lead_guarded returns 0 rows, got ' || v_cnt;
+  select count(*) into v_cnt from l2v.capture_lead_guarded(v_clinic, v_mgr);
+  assert v_cnt = 0, 'T2 staff (manager): capture_lead_guarded returns 0 rows, got ' || v_cnt;
+  select count(*) into v_cnt from l2v.qualify_contact(v_clinic, v_rep1, 'high', 'now');
+  assert v_cnt = 0, 'T2 staff: qualify_contact returns 0 rows, got ' || v_cnt;
+
+  -- Case 4: existing patient (confirmed appointment) without referral -> returns no row
+  insert into public.appointments (clinic_id, contact_id, provider_id, service_id, starts_at, ends_at, status)
+  values (v_clinic, v_p2, v_prov, v_svc, now() + interval '3 days', now() + interval '3 days 30 minutes', 'confirmed');
+  select count(*) into v_cnt from l2v.capture_lead_guarded(v_clinic, v_p2, 'organic', null, null);
+  assert v_cnt = 0, 'T2 existing patient without referral: returns 0 rows, got ' || v_cnt;
+
+  -- Case 5: existing patient (confirmed appointment) WITH referral -> captures lead
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_clinic, v_p2, 'click_to_whatsapp', 'retarg_camp', '{"source_id":"ad_retarg"}'::jsonb);
+  assert v_lead is not null and v_new, 'T2 existing patient with referral: captures new open lead';
+  select * into v_lead2, v_new
+    from l2v.capture_lead_guarded(v_clinic, v_p2, 'click_to_whatsapp', 'retarg_camp', '{"source_id":"ad_retarg"}'::jsonb);
+  assert v_lead2 = v_lead and not v_new, 'T2 existing patient with referral: idempotent on open lead';
+
+  raise notice 'T2 tests: happy_path, no_open_lead, staff, existing_no_referral, existing_with_referral: OK';
+
   raise notice 'ALL ADD-ON TESTS PASSED';
 end $$;
 
@@ -166,11 +208,16 @@ do $$ begin
   exception when insufficient_privilege then raise notice 'anon table denied'; end;
   begin perform l2v.escalate_overdue(); raise exception 'anon executed function';
   exception when insufficient_privilege then raise notice 'anon function denied'; end;
+  begin perform l2v.capture_lead_guarded(gen_random_uuid(), gen_random_uuid()); raise exception 'anon executed capture_lead_guarded';
+  exception when insufficient_privilege then null; end;
+  begin perform l2v.qualify_contact(gen_random_uuid(), gen_random_uuid(), 'low', 'later'); raise exception 'anon executed qualify_contact';
+  exception when insufficient_privilege then null; end;
 end $$;
 reset role;
 set role clinicos_api_owner;
 do $$ begin
   perform l2v.is_staff(gen_random_uuid(), '+20');
+  perform l2v.qualify_contact(gen_random_uuid(), gen_random_uuid(), 'low', 'later');
   begin perform 1 from l2v.leads limit 1; raise exception 'runtime role read table directly';
   exception when insufficient_privilege then raise notice 'runtime role: functions yes, tables no'; end;
 end $$;

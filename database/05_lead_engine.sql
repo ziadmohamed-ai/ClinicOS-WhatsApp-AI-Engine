@@ -50,7 +50,7 @@ create table l2v.leads (
   clinic_id          uuid not null references public.clinics (id) on delete cascade,
   contact_id         uuid not null references public.contacts (id) on delete cascade,
   source             text not null
-                     check (source in ('click_to_whatsapp', 'lead_form', 'website', 'manual')),
+                     check (source in ('click_to_whatsapp', 'lead_form', 'website', 'manual', 'organic')),
   campaign           text,
   referral           jsonb,
   treatment_interest text,
@@ -196,6 +196,57 @@ begin
 end;
 $$;
 
+-- Guarded capture for the inbound webhook gate:
+--   * returns no row (does not raise) if the contact is staff (rep or manager)
+--   * creates/returns the open lead ONLY if the message has a referral
+--     OR the contact has no confirmed/completed appointment in this clinic
+create function l2v.capture_lead_guarded(
+  p_clinic_id   uuid,
+  p_contact_id  uuid,
+  p_source      text default 'click_to_whatsapp',
+  p_campaign    text default null,
+  p_referral    jsonb default null,
+  p_received_at timestamptz default now()
+)
+returns table (lead_id uuid, is_new boolean)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_has_referral boolean;
+begin
+  if not exists (select 1 from public.contacts c where c.id = p_contact_id and c.clinic_id = p_clinic_id) then
+    raise exception 'contact % does not belong to clinic %', p_contact_id, p_clinic_id;
+  end if;
+
+  if exists (select 1 from l2v.reps r where r.contact_id = p_contact_id)
+     or exists (select 1 from l2v.settings s where s.manager_contact_id = p_contact_id) then
+    return;
+  end if;
+
+  v_has_referral := p_referral is not null
+                and p_referral <> 'null'::jsonb
+                and p_referral <> '{}'::jsonb;
+
+  if not v_has_referral and exists (
+    select 1
+      from public.appointments ap
+     where ap.clinic_id = p_clinic_id
+       and ap.contact_id = p_contact_id
+       and ap.status in ('confirmed', 'completed')
+  ) then
+    return;
+  end if;
+
+  return query
+  select *
+    from l2v.capture_lead(
+      p_clinic_id, p_contact_id, p_source, p_campaign, null, p_referral, p_received_at
+    );
+end;
+$$;
+
 -- Round-robin: the active rep assigned least recently gets the lead.
 -- Returns the assignment id, or null when no eligible rep is left.
 create function l2v.assign_lead(p_lead_id uuid, p_exclude_rep_ids uuid[] default '{}')
@@ -304,6 +355,44 @@ begin
   end if;
 
   return query select v_status, v_score::smallint, v_assign;
+end;
+$$;
+
+-- Qualify by contact_id: finds the contact's open lead in this clinic and calls
+-- l2v.set_qualification. Returns no row (does not raise) if there is no open lead.
+create function l2v.qualify_contact(
+  p_clinic_id   uuid,
+  p_contact_id  uuid,
+  p_budget_band text,
+  p_timing      text,
+  p_treatment   text default null
+)
+returns table (status text, score smallint, assignment_id uuid)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_lead l2v.leads%rowtype;
+begin
+  select l.* into v_lead
+    from l2v.leads l
+   where l.clinic_id = p_clinic_id
+     and l.contact_id = p_contact_id
+     and l.status <> 'closed';
+
+  if not found then
+    return;
+  end if;
+
+  return query
+  select *
+    from l2v.set_qualification(
+      v_lead.id,
+      coalesce(p_budget_band, v_lead.budget_band),
+      coalesce(p_timing, v_lead.timing),
+      p_treatment
+    );
 end;
 $$;
 
@@ -545,8 +634,10 @@ begin
       execute format('grant execute on function
         l2v.is_staff(uuid, text),
         l2v.capture_lead(uuid, uuid, text, text, text, jsonb, timestamptz),
+        l2v.capture_lead_guarded(uuid, uuid, text, text, jsonb, timestamptz),
         l2v.assign_lead(uuid, uuid[]),
         l2v.set_qualification(uuid, text, text, text),
+        l2v.qualify_contact(uuid, uuid, text, text, text),
         l2v.rep_ack(uuid, text),
         l2v.escalate_overdue(),
         l2v.kpi_daily(uuid, date, date)
