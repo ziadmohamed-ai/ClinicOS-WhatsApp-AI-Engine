@@ -351,7 +351,14 @@ begin
   end if;
 
   if v_status = 'hot' then
-    v_assign := l2v.assign_lead(p_lead_id);
+    if not exists (select 1 from l2v.assignments a where a.lead_id = p_lead_id) then
+      v_assign := l2v.assign_lead(p_lead_id);
+    else
+      select a.id into v_assign
+        from l2v.assignments a
+       where a.lead_id = p_lead_id and a.status in ('pending', 'acked')
+       limit 1;
+    end if;
   end if;
 
   return query select v_status, v_score::smallint, v_assign;

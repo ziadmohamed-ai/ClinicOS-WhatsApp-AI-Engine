@@ -198,6 +198,73 @@ begin
 
   raise notice 'T2 tests: happy_path, no_open_lead, staff, existing_no_referral, existing_with_referral: OK';
 
+  -- Ensure rep1 is opted back in so handoff outbox assertions apply regardless of rotation order
+  update public.contacts set communications_opted_out_at = null where id = v_rep1;
+
+  -- (1) Qualify again after closed_booked -> still 1 assignment and 1 handoff row
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201666666666', 'Salma') returning id into v_p2;
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_clinic, v_p2, 'click_to_whatsapp', 'camp_booked', '{"source_id":"ad_booked"}'::jsonb);
+  select * into v_q from l2v.qualify_contact(v_clinic, v_p2, 'high', 'now', 'implant');
+  v_a1 := v_q.assignment_id;
+  assert v_a1 is not null, 'T2 booked guard: initial hot qualification assigns rep';
+  assert (select count(*) from l2v.assignments where lead_id = v_lead) = 1, 'T2 booked guard: 1 assignment initially';
+  assert (select count(*) from public.outbox where idempotency_key = 'l2v:handoff:' || v_a1::text) = 1,
+    'T2 booked guard: 1 handoff row initially';
+  insert into public.appointments (clinic_id, contact_id, provider_id, service_id, starts_at, ends_at, status)
+  values (v_clinic, v_p2, v_prov, v_svc, now() + interval '4 days', now() + interval '4 days 30 minutes', 'confirmed');
+  update l2v.assignments set sla_due_at = now() - interval '1 minute' where lead_id = v_lead;
+  perform l2v.escalate_overdue();
+  assert (select status from l2v.assignments where id = v_a1) = 'closed_booked',
+    'T2 booked guard: assignment became closed_booked';
+  v_n := (select count(*) from public.outbox);
+  select * into v_q from l2v.qualify_contact(v_clinic, v_p2, 'high', 'now', 'implant');
+  assert v_q.assignment_id is null, 'T2 booked guard: repeat qualify returns null assignment_id';
+  assert (select count(*) from l2v.assignments where lead_id = v_lead) = 1,
+    'T2 booked guard: still 1 assignment after re-qualify';
+  assert (select count(*) from public.outbox) = v_n,
+    'T2 booked guard: still 1 handoff row (no new outbox row)';
+
+  -- (2) Qualify again after the escalation chain is exhausted -> no new assignment
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201777777777', 'Tarek') returning id into v_p2;
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_clinic, v_p2, 'click_to_whatsapp', 'camp_exh', '{"source_id":"ad_exh"}'::jsonb);
+  perform l2v.qualify_contact(v_clinic, v_p2, 'high', 'now', 'ortho');
+  update l2v.assignments set sla_due_at = now() - interval '1 minute' where lead_id = v_lead and status = 'pending';
+  perform l2v.escalate_overdue();
+  update l2v.assignments set sla_due_at = now() - interval '1 minute' where lead_id = v_lead and status = 'pending';
+  perform l2v.escalate_overdue();
+  assert (select count(*) from l2v.assignments where lead_id = v_lead) = 2,
+    'T2 exhausted guard: 2 escalated assignments total';
+  assert (select count(*) from l2v.assignments where lead_id = v_lead and status = 'pending') = 0,
+    'T2 exhausted guard: no pending assignment remains';
+  v_n := (select count(*) from public.outbox);
+  select * into v_q from l2v.qualify_contact(v_clinic, v_p2, 'high', 'now', 'ortho');
+  assert v_q.assignment_id is null, 'T2 exhausted guard: repeat qualify returns null assignment_id';
+  assert (select count(*) from l2v.assignments where lead_id = v_lead) = 2,
+    'T2 exhausted guard: no new assignment created after exhaustion';
+  assert (select count(*) from public.outbox) = v_n,
+    'T2 exhausted guard: no new outbox handoff row after exhaustion';
+
+  -- (3) Warm first, turns hot later -> still gets assigned once
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201888888888', 'Dina') returning id into v_p2;
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_clinic, v_p2, 'click_to_whatsapp', 'camp_warm', '{"source_id":"ad_warm"}'::jsonb);
+  select * into v_q from l2v.qualify_contact(v_clinic, v_p2, 'low', 'now', 'whitening');
+  assert v_q.status = 'warm' and v_q.score = 65 and v_q.assignment_id is null,
+    'T2 warm->hot: warm turn has no assignment';
+  assert (select count(*) from l2v.assignments where lead_id = v_lead) = 0,
+    'T2 warm->hot: 0 assignments while warm';
+  select * into v_q from l2v.qualify_contact(v_clinic, v_p2, 'high', 'now', 'whitening');
+  assert v_q.status = 'hot' and v_q.score = 100 and v_q.assignment_id is not null,
+    'T2 warm->hot: assigned once lead turns hot';
+  assert (select count(*) from l2v.assignments where lead_id = v_lead) = 1,
+    'T2 warm->hot: exactly 1 assignment created';
+  assert (select count(*) from public.outbox where idempotency_key = 'l2v:handoff:' || v_q.assignment_id::text) = 1,
+    'T2 warm->hot: handoff outbox row queued';
+
+  raise notice 'T2 re-qualify guards: after_closed_booked, after_chain_exhausted, warm_to_hot: OK';
+
   raise notice 'ALL ADD-ON TESTS PASSED';
 end $$;
 
