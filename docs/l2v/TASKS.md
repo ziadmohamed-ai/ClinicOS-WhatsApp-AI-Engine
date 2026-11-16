@@ -66,6 +66,8 @@ FROM s;
 - `Is Staff?`: true -> nothing connected; false -> `Route Turn`. `Parse Turn & State` now connects to `L2V Prepare`, not directly to `Route Turn`.
 - `L2V Qualify?` is a **side branch from `Emergency Reply Guard`** (it must not change what `Search Slots?` receives). Condition: `lead_timing` or `lead_budget_band` is set.
   `L2V Qualify` runs `SELECT * FROM l2v.qualify_contact($1::uuid, $2::uuid, $3, $4, $5);` and has no outgoing connection.
+- **Fail-open (important):** the add-on must never stop a patient's message from being answered. Set `onError: "continueRegularOutput"` on `L2V Gate` and
+  `L2V Qualify`, and make `L2V Merge` treat a missing or failed gate result as `l2v_is_staff = false`. A broken add-on must degrade to plain ClinicOS behaviour.
 - Write `tests/validate_workflow.js` and run it on both workflow files: every connection target exists, no orphan nodes, node names unique,
   all pre-existing connections preserved except `Parse Turn & State -> Route Turn`, credentials are placeholders. Wire it into the README's test instructions.
 
