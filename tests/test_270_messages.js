@@ -3,6 +3,11 @@ const assert = require('assert');
 const { PARSE_TURN_AND_STATE_JS } = require('./build_upgraded_nodes.js');
 const { PARSE_AI_OUTPUT_JS, FORMAT_SLOT_LIST_JS } = require('./parser_and_formatter.js');
 
+// Pin wall-clock time to the fixture reference date (Wed 2026-11-11, the day before
+// Thu 2026-11-12 in SAMPLE_SLOTS_*) so future-window clamping in Parse AI Output stays deterministic.
+const FIXTURE_NOW_MS = Date.parse('2026-11-11T12:00:00+03:00');
+Date.now = () => FIXTURE_NOW_MS;
+
 const CLINIC_SERVICES = [
   { id: 'c1026576-0835-48b2-9a91-67f0d335c5c7', code: 'DENTAL_CHECKUP', name_ar: 'فحص وتنظيف الأسنان', name_en: 'Dental Checkup', price_sar: 180, duration_minutes: 30 },
   { id: 'f4f0e818-5025-49eb-9a10-2bc0fb0eb002', code: 'DENTAL_CLEANING', name_ar: 'جلسة تنظيف وتلميع الأسنان', name_en: 'Teeth Cleaning & Polishing', price_sar: 250, duration_minutes: 45 },
@@ -1925,6 +1930,25 @@ addTest('Wording: an AI closing line with an invented time is rejected', WP, () 
     aiOutput: { intent: 'booking_request', service_code: 'DENTAL_CLEANING', dialect: 'ar-EG', confidence: 0.95, reply_text: 'من عنيا، ده المتاح لتنظيف الأسنان:', slot_closing_text: 'نثبتلك الساعة 9؟' }
   });
   assert.ok(!formatted.reply_text.includes('الساعة 9؟'), formatted.reply_text);
+});
+addTest('Past narrow requested_from/to falls back to 7-day future window and does not pre-select multi-slot list', 'Red-Team & Vulnerability Regression', () => {
+  const { parsed, formatted } = runPipelineTurn({
+    inboundText: 'عايز أحجز تنظيف أسنان إمبارح الساعة 4',
+    aiOutput: {
+      intent: 'booking_request',
+      service_code: 'DENTAL_CLEANING',
+      requested_from: '2026-11-10T16:00:00+03:00',
+      requested_to: '2026-11-10T17:00:00+03:00',
+      dialect: 'ar-EG',
+      confidence: 0.92,
+      reply_text: 'حاضر.'
+    },
+    rawSlots: SAMPLE_SLOTS_AFTERNOON
+  });
+  assert.strictEqual(parsed.should_query_slots, true);
+  assert.strictEqual(parsed.requested_from, new Date(FIXTURE_NOW_MS + 60 * 1000).toISOString());
+  assert.strictEqual(parsed.requested_to, new Date(FIXTURE_NOW_MS + 7 * 24 * 60 * 60 * 1000).toISOString());
+  assert.strictEqual(formatted.state_patch.pending_booking.selected_slot, null);
 });
 
 // ============================================================================
