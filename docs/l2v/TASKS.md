@@ -83,6 +83,31 @@ Copy `Error Trigger` -> `Log Workflow Error` from the main workflow (same query,
 Correct the test claim (use the real number from T1), add a "Lead-to-Visit add-on" section: what it does, install order (01–05, workflow import, templates),
 and the acceptance checklist below. No marketing claims without a measurement.
 
+## T9 — Remove the hard-coded clinic from the database layer (needed before a second clinic)
+Today the runtime is tied to one clinic id (`5b201616-fdf0-4a37-8863-bd050ea90376`):
+- `database/03_rls_policies.sql`: all 12 policies for role `clinicos_api_owner` filter on that literal UUID.
+- `database/02_booking_and_outbox_rpcs.sql` (~line 2397): `log_workflow_error` falls back to that UUID.
+- `database/04_seed_data.sql`: the demo clinic uses it (fine for a demo, but must be clearly marked as demo data).
+**Decision needed before coding. Write both options with trade-offs in the PR description and stop; if the reviewer says nothing, implement Option 1.**
+- *Option 1 (default): one Supabase project + one n8n credential per clinic.* The clinic id is generated at install time: turn the policies into a
+  template (`database/03_rls_policies.sql.tpl`) and add `scripts/new_clinic.sh <clinic-name>` that creates the clinic row, renders the policies with its id and prints next steps.
+  Strongest isolation, simplest to reason about, matches how the code already assumes a single clinic.
+- *Option 2: one shared instance for many clinics.* Policies filter on a transaction-scoped setting (`current_setting('clinicos.clinic_id', true)`) that the workflow must set in the
+  same transaction as every query. n8n's Postgres node makes that easy to get wrong, so this option needs a design for how it is enforced and tested.
+Acceptance (either option): no clinic UUID literal remains outside seed/demo files (`grep -rn 5b201616 database workflow nodes` shows only seed data),
+`log_workflow_error` no longer guesses a clinic, and a SQL test proves that a second clinic's rows are invisible to the first clinic's runtime role.
+
+## T10 — Make the dashboard show real numbers (or say clearly that it is a demo)
+`dashboard/index.html` is a static mock: the numbers and the "live pipeline" log are hard-coded. Clients are shown it as if it were live, which is a trust risk.
+- New n8n workflow `workflow/clinicos-dashboard-api.json`, name **`ClinicOS Dashboard API`**: Webhook `GET /dashboard-kpis?from=YYYY-MM-DD&to=YYYY-MM-DD`,
+  header `x-dashboard-token` checked against a value stored in n8n credentials (reject with 401 otherwise), then Postgres `SELECT * FROM l2v.kpi_daily($1::uuid, $2::date, $3::date)`.
+  Return counts only, **no names or phone numbers**.
+- The dashboard fetches that endpoint. The URL and token are configuration (a small `dashboard/config.example.js`), never committed with real values.
+- If the endpoint is not configured or unreachable, the page must show a visible **"DEMO DATA"** banner and keep the sample numbers; with a working endpoint it shows real numbers and no banner.
+- Remove or relabel the fake "live pipeline" log lines that claim a connection to a workflow id.
+Acceptance: opened without config -> "DEMO DATA" banner; with a local stub server returning JSON -> real numbers and no banner; no secrets in the repo.
+Needs T5-T7 done first (the KPI function must be reachable and seeded).
+
 ## Acceptance checklist for the whole add-on (manual, in staging, by a human)
 1. Ad message -> a row in `l2v.leads` with source and campaign.
 2. Patient says "I want to start this week" and the price is fine -> lead becomes `hot` and the rep gets the handoff template with the button.
@@ -92,4 +117,5 @@ and the acceptance checklist below. No marketing claims without a measurement.
 6. `l2v.kpi_daily` returns plausible numbers.
 
 ## Phase 2 (do not start without approval)
-Connect `dashboard/index.html` to `l2v.kpi_daily` (the dashboard is currently a static mock); weekly KPI message to the clinic owner.
+Weekly KPI message to the clinic owner on WhatsApp (`l2v.kpi_daily` -> `public.enqueue_message`, scheduled workflow, template needs Meta approval).
+Win-back messages to cold leads (these are marketing-category WhatsApp messages, so price them first).
