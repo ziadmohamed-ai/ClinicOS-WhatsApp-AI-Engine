@@ -2170,6 +2170,95 @@ addTest('L2V Parse AI Output: early return branches (plainReply, cancel pending,
   assert.strictEqual(inj.parsed.lead_budget_band, null);
 });
 
+addTest('L2V Parse AI Output: emergency turn forces lead_timing and lead_budget_band to null', 'Lead-to-Visit', () => {
+  const hardEmergency = runPipelineTurn({
+    inboundText: 'عندي نزيف شديد ومش قادر اتنفس',
+    aiOutput: { intent: 'faq', dialect: 'ar-EG', confidence: 0.95, reply_text: 'توجه للطوارئ فوراً.', lead_timing: 'now', lead_budget_band: 'high' }
+  });
+  assert.strictEqual(hardEmergency.parsed.intent, 'emergency');
+  assert.strictEqual(hardEmergency.parsed.lead_timing, null);
+  assert.strictEqual(hardEmergency.parsed.lead_budget_band, null);
+
+  const aiEmergency = runPipelineTurn({
+    inboundText: 'الحقوني بسرعة',
+    aiOutput: { intent: 'emergency', dialect: 'ar-EG', confidence: 0.95, reply_text: 'توجه للطوارئ فوراً.', lead_timing: 'now', lead_budget_band: 'high' }
+  });
+  assert.strictEqual(aiEmergency.parsed.lead_timing, null);
+  assert.strictEqual(aiEmergency.parsed.lead_budget_band, null);
+});
+
+addTest('L2V Parse AI Output: complaint / human_handoff turn forces lead_timing and lead_budget_band to null', 'Lead-to-Visit', () => {
+  const hardComplaint = runPipelineTurn({
+    inboundText: 'عندي شكوي وعايز اكلم مدير العياده حالا',
+    aiOutput: { intent: 'faq', dialect: 'ar-EG', confidence: 0.95, reply_text: 'حاضر هحولك للإدارة.', lead_timing: 'now', lead_budget_band: 'high' }
+  });
+  assert.strictEqual(hardComplaint.parsed.intent, 'human_handoff');
+  assert.strictEqual(hardComplaint.parsed.lead_timing, null);
+  assert.strictEqual(hardComplaint.parsed.lead_budget_band, null);
+
+  const aiHandoff = runPipelineTurn({
+    inboundText: 'الخدمة المرة اللي فاتت مكنتش كويسة خالص',
+    aiOutput: { intent: 'human_handoff', needs_human: true, dialect: 'ar-EG', confidence: 0.95, reply_text: 'حاضر هحولك للإدارة.', lead_timing: 'now', lead_budget_band: 'high' }
+  });
+  assert.strictEqual(aiHandoff.parsed.lead_timing, null);
+  assert.strictEqual(aiHandoff.parsed.lead_budget_band, null);
+});
+
+addTest('L2V Parse AI Output: medical_question turn forces lead_timing and lead_budget_band to null', 'Lead-to-Visit', () => {
+  const hardMedical = runPipelineTurn({
+    inboundText: 'ينفع اخد مضاد حيوي ايه لالتهاب اللثه؟',
+    aiOutput: { intent: 'faq', dialect: 'ar-EG', confidence: 0.95, reply_text: 'الطبيب يحدد الدواء بعد الكشف.', lead_timing: 'now', lead_budget_band: 'high' }
+  });
+  assert.strictEqual(hardMedical.parsed.intent, 'medical_question');
+  assert.strictEqual(hardMedical.parsed.lead_timing, null);
+  assert.strictEqual(hardMedical.parsed.lead_budget_band, null);
+
+  const aiMedical = runPipelineTurn({
+    inboundText: 'ضرس العقل مطلع خراج اخدله ايه؟',
+    aiOutput: { intent: 'medical_question', dialect: 'ar-EG', confidence: 0.95, reply_text: 'الطبيب يحدد الدواء بعد الكشف.', lead_timing: 'now', lead_budget_band: 'high' }
+  });
+  assert.strictEqual(aiMedical.parsed.lead_timing, null);
+  assert.strictEqual(aiMedical.parsed.lead_budget_band, null);
+});
+
+addTest('L2V Parse AI Output: control — normal booking_request and normal faq pass lead signals through', 'Lead-to-Visit', () => {
+  const booking = runPipelineTurn({
+    inboundText: 'عايز احجز تنظيف اسنان بكرة الصبح والسعر مناسب جدا',
+    aiOutput: {
+      intent: 'booking_request',
+      service_code: 'DENTAL_CLEANING',
+      requested_from: '2026-11-12T10:00:00+03:00',
+      requested_to: '2026-11-12T13:00:00+03:00',
+      dialect: 'ar-EG',
+      confidence: 0.95,
+      reply_text: 'حاضر دي المواعيد المتاحة:',
+      lead_timing: 'now',
+      lead_budget_band: 'high'
+    }
+  });
+  assert.strictEqual(booking.parsed.intent, 'booking_request');
+  assert.strictEqual(booking.parsed.needs_human, false);
+  assert.strictEqual(booking.parsed.lead_timing, 'now');
+  assert.strictEqual(booking.parsed.lead_budget_band, 'high');
+
+  const faq = runPipelineTurn({
+    inboundText: 'بكام جلسة الهيدرافيشل؟ بفكر أعملها الشهر ده',
+    aiOutput: {
+      intent: 'faq',
+      service_code: 'HYDRAFACIAL',
+      dialect: 'ar-EG',
+      confidence: 0.95,
+      reply_text: 'جلسة الهيدرافيشل بـ 450 ريال.',
+      lead_timing: 'this_month',
+      lead_budget_band: 'mid'
+    }
+  });
+  assert.strictEqual(faq.parsed.intent, 'faq');
+  assert.strictEqual(faq.parsed.needs_human, false);
+  assert.strictEqual(faq.parsed.lead_timing, 'this_month');
+  assert.strictEqual(faq.parsed.lead_budget_band, 'mid');
+});
+
 // ============================================================================
 // EXECUTE ALL 270 TESTS & REPORT SUMMARY
 // ============================================================================

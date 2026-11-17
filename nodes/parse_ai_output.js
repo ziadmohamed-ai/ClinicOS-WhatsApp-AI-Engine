@@ -1245,8 +1245,17 @@ function parseLeadEnum(val, allowedSet) {
   const norm = val.trim().toLowerCase();
   return allowedSet.has(norm) ? norm : null;
 }
-const leadTiming = isPromptInjection ? null : parseLeadEnum(parsed.lead_timing, ALLOWED_LEAD_TIMINGS);
-const leadBudgetBand = isPromptInjection ? null : parseLeadEnum(parsed.lead_budget_band, ALLOWED_LEAD_BUDGET_BANDS);
+const suppressLeadSignals =
+  isPromptInjection ||
+  needsHuman ||
+  intent === "emergency" ||
+  intent === "human_handoff" ||
+  intent === "medical_question" ||
+  isHardEmergency ||
+  isHardHandoff ||
+  isHardMedical;
+const leadTiming = suppressLeadSignals ? null : parseLeadEnum(parsed.lead_timing, ALLOWED_LEAD_TIMINGS);
+const leadBudgetBand = suppressLeadSignals ? null : parseLeadEnum(parsed.lead_budget_band, ALLOWED_LEAD_BUDGET_BANDS);
 
 return {
   json: {
