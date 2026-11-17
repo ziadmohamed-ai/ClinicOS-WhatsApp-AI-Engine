@@ -5,8 +5,10 @@ const readNode = (name) => fs.readFileSync(path.join(__dirname, '..', 'nodes', n
 
 const PARSE_AI_OUTPUT_JS = readNode('parse_ai_output.js');
 const FORMAT_SLOT_LIST_JS = readNode('format_slot_list.js');
+const L2V_PREPARE_JS = readNode('l2v_prepare.js');
 
 module.exports = {
   PARSE_AI_OUTPUT_JS,
   FORMAT_SLOT_LIST_JS,
+  L2V_PREPARE_JS,
 };

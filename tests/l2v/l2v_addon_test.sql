@@ -263,7 +263,15 @@ begin
   assert (select count(*) from public.outbox where idempotency_key = 'l2v:handoff:' || v_q.assignment_id::text) = 1,
     'T2 warm->hot: handoff outbox row queued';
 
-  raise notice 'T2 re-qualify guards: after_closed_booked, after_chain_exhausted, warm_to_hot: OK';
+  -- (4) capture_lead_guarded with NULL p_received_at creates the lead and sets first_inbound_at to non-null
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201999999991', 'Karim') returning id into v_p2;
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_clinic, v_p2, 'organic', null, null, null);
+  assert v_lead is not null and v_new, 'T3 null received_at: capture_lead_guarded creates open lead';
+  assert (select first_inbound_at from l2v.leads where id = v_lead) is not null,
+    'T3 null received_at: first_inbound_at defaulted via coalesce(p_received_at, now())';
+
+  raise notice 'T2 re-qualify guards: after_closed_booked, after_chain_exhausted, warm_to_hot, null_received_at: OK';
 
   raise notice 'ALL ADD-ON TESTS PASSED';
 end $$;

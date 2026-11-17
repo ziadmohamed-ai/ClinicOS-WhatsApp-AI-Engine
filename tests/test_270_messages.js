@@ -1,7 +1,7 @@
 // 200-Message Comprehensive Evaluation & Adversarial Test Suite for ClinicOS Engine
 const assert = require('assert');
 const { PARSE_TURN_AND_STATE_JS } = require('./build_upgraded_nodes.js');
-const { PARSE_AI_OUTPUT_JS, FORMAT_SLOT_LIST_JS } = require('./parser_and_formatter.js');
+const { PARSE_AI_OUTPUT_JS, FORMAT_SLOT_LIST_JS, L2V_PREPARE_JS } = require('./parser_and_formatter.js');
 
 // Pin wall-clock time to the fixture reference date (Wed 2026-11-11, the day before
 // Thu 2026-11-12 in SAMPLE_SLOTS_*) so future-window clamping in Parse AI Output stays deterministic.
@@ -38,6 +38,7 @@ const SAMPLE_SLOTS_AFTERNOON = [
 const fnParseTurn = new Function('$input', PARSE_TURN_AND_STATE_JS);
 const fnParseAi = new Function('$json', '$', PARSE_AI_OUTPUT_JS);
 const fnFormatSlots = new Function('$json', '$', FORMAT_SLOT_LIST_JS);
+const fnL2vPrepare = new Function('$json', '$input', L2V_PREPARE_JS);
 
 function runPipelineTurn({
   inboundText,
@@ -1949,6 +1950,107 @@ addTest('Past narrow requested_from/to falls back to 7-day future window and doe
   assert.strictEqual(parsed.requested_from, new Date(FIXTURE_NOW_MS + 60 * 1000).toISOString());
   assert.strictEqual(parsed.requested_to, new Date(FIXTURE_NOW_MS + 7 * 24 * 60 * 60 * 1000).toISOString());
   assert.strictEqual(formatted.state_patch.pending_booking.selected_slot, null);
+});
+
+// ============================================================================
+// CATEGORY: LEAD-TO-VISIT GATE PARAMETER PREPARATION (T3)
+// ============================================================================
+function runL2vPrepare(itemJson) {
+  const inputWrapper = itemJson === undefined ? undefined : { item: { json: itemJson } };
+  return fnL2vPrepare(itemJson, inputWrapper).json;
+}
+
+addTest('L2V Prepare: ad message with referral.headline extracts click_to_whatsapp and headline campaign', 'Lead-to-Visit', () => {
+  const referral = { headline: 'Summer Veneers Offer', source_id: 'ad_101', ctwa_clid: 'clid_xyz' };
+  const out = runL2vPrepare({
+    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
+    phone: '201001234567',
+    message_timestamp: '2026-11-11T09:00:00Z',
+    payload: { type: 'text', text: { body: 'بكام التبييض' }, referral }
+  });
+  assert.strictEqual(out.clinic_id, '5b201616-fdf0-4a37-8863-bd050ea90376');
+  assert.strictEqual(out.contact_id, 'cac3cdbc-ab13-414b-acff-f1adc214e340');
+  assert.strictEqual(out.phone_e164, '+201001234567');
+  assert.strictEqual(out.source, 'click_to_whatsapp');
+  assert.strictEqual(out.campaign, 'Summer Veneers Offer');
+  assert.deepStrictEqual(out.referral, referral);
+  assert.strictEqual(out.message_timestamp, '2026-11-11T09:00:00.000Z');
+});
+
+addTest('L2V Prepare: referral with blank headline falls back to referral.source_id', 'Lead-to-Visit', () => {
+  const referral = { headline: '   ', source_id: 'ad_202', source_type: 'ad' };
+  const out = runL2vPrepare({
+    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
+    phone: '+201001234567',
+    message_timestamp: '2026-11-11T10:30:00+02:00',
+    payload: { referral }
+  });
+  assert.strictEqual(out.source, 'click_to_whatsapp');
+  assert.strictEqual(out.campaign, 'ad_202');
+  assert.deepStrictEqual(out.referral, referral);
+  assert.strictEqual(out.message_timestamp, '2026-11-11T08:30:00.000Z');
+});
+
+addTest('L2V Prepare: organic message without referral emits organic source and null campaign/referral', 'Lead-to-Visit', () => {
+  const out = runL2vPrepare({
+    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
+    phone: '+201001234567',
+    message_timestamp: '2026-11-11T12:00:00Z',
+    payload: { type: 'text', text: { body: 'عايز احجز كشف' } }
+  });
+  assert.strictEqual(out.source, 'organic');
+  assert.strictEqual(out.campaign, null);
+  assert.strictEqual(out.referral, null);
+  assert.ok(['click_to_whatsapp', 'organic'].includes(out.source));
+});
+
+addTest('L2V Prepare: normalizes phone with +, without +, spaces/dashes, or fallback phone_e164', 'Lead-to-Visit', () => {
+  const noPlus = runL2vPrepare({ phone: '201009998877' });
+  assert.strictEqual(noPlus.phone_e164, '+201009998877');
+  assert.strictEqual(noPlus.phone, '+201009998877');
+
+  const withFormatting = runL2vPrepare({ phone: '   ', phone_e164: '+20 100-999-8877' });
+  assert.strictEqual(withFormatting.phone_e164, '+201009998877');
+});
+
+addTest('L2V Prepare: never throws on missing, null, or malformed fields and returns safe nulls', 'Lead-to-Visit', () => {
+  for (const bad of [undefined, null, {}, { phone: '---', payload: { referral: {} }, message_timestamp: 'not-a-date' }]) {
+    const out = runL2vPrepare(bad);
+    assert.strictEqual(out.clinic_id, null);
+    assert.strictEqual(out.phone_e164, null);
+    assert.strictEqual(out.contact_id, null);
+    assert.strictEqual(out.source, 'organic');
+    assert.strictEqual(out.campaign, null);
+    assert.strictEqual(out.referral, null);
+    assert.strictEqual(out.message_timestamp, null);
+  }
+});
+
+addTest('L2V Prepare: falls back to Meta payload.timestamp unix seconds when message_timestamp is absent', 'Lead-to-Visit', () => {
+  const out = runL2vPrepare({
+    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
+    phone: '201001234567',
+    payload: { timestamp: '1762851600' }
+  });
+  assert.strictEqual(out.source, 'organic');
+  assert.strictEqual(out.message_timestamp, '2025-11-11T09:00:00.000Z');
+});
+
+addTest('L2V Prepare: caps campaign at 200 characters on a 5000-character headline', 'Lead-to-Visit', () => {
+  const longHeadline = 'A'.repeat(5000);
+  const out = runL2vPrepare({
+    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
+    phone: '+201001234567',
+    payload: { referral: { headline: longHeadline, source_id: 'ad_long' } }
+  });
+  assert.strictEqual(out.source, 'click_to_whatsapp');
+  assert.strictEqual(out.campaign.length, 200);
+  assert.strictEqual(out.campaign, 'A'.repeat(200));
 });
 
 // ============================================================================
