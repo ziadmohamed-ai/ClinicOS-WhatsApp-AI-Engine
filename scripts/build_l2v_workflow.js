@@ -11,7 +11,10 @@ const { syncWorkflowFile, syncWorkflowNodeCode } = require('./sync_node_code.js'
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SRC_WORKFLOW_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.json');
 const DST_WORKFLOW_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.l2v.json');
+const SLA_WORKFLOW_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-l2v-sla-tick.json');
 const L2V_PREPARE_NODE_PATH = path.join(REPO_ROOT, 'nodes', 'l2v_prepare.js');
+
+const L2V_ESCALATE_QUERY = 'SELECT l2v.escalate_overdue() AS escalated;';
 
 const L2V_GATE_QUERY = [
   'WITH s AS (SELECT l2v.is_staff($1::uuid, $2::text) AS is_staff)',
@@ -55,9 +58,30 @@ const L2V_MERGE_JS_CODE = [
 
 const L2V_QUALIFY_QUERY = 'SELECT * FROM l2v.qualify_contact($1::uuid, $2::uuid, $3, $4, $5);';
 
+function writeJsonIfChanged(filePath, obj) {
+  const nextLf = JSON.stringify(obj, null, 2) + '\n';
+  if (fs.existsSync(filePath)) {
+    const prevRaw = fs.readFileSync(filePath, 'utf8');
+    const prevLf = prevRaw.replace(/\r\n/g, '\n');
+    const prevTrimmed = prevLf.endsWith('\n') ? prevLf : prevLf + '\n';
+    if (prevTrimmed === nextLf) {
+      return;
+    }
+    const useCrlf = prevRaw.includes('\r\n');
+    fs.writeFileSync(filePath, useCrlf ? nextLf.replace(/\n/g, '\r\n') : nextLf, 'utf8');
+    return;
+  }
+  fs.writeFileSync(filePath, nextLf, 'utf8');
+}
+
 function buildL2vWorkflow() {
   // Ensure the base workflow is synced with nodes/*.js and prompts/receptionist-system-prompt.xml first
-  syncWorkflowFile(SRC_WORKFLOW_PATH);
+  const srcRaw = fs.readFileSync(SRC_WORKFLOW_PATH, 'utf8');
+  const srcObj = JSON.parse(srcRaw);
+  syncWorkflowNodeCode(srcObj);
+  if (JSON.stringify(srcObj) !== JSON.stringify(JSON.parse(srcRaw))) {
+    syncWorkflowFile(SRC_WORKFLOW_PATH);
+  }
 
   const rawWf = fs.readFileSync(SRC_WORKFLOW_PATH, 'utf8');
   const wf = JSON.parse(rawWf);
@@ -243,12 +267,133 @@ function buildL2vWorkflow() {
     main: [[{ node: 'L2V Qualify', type: 'main', index: 0 }], []],
   };
 
-  fs.writeFileSync(DST_WORKFLOW_PATH, JSON.stringify(wf, null, 2) + '\n', 'utf8');
+  writeJsonIfChanged(DST_WORKFLOW_PATH, wf);
   console.log(`Built ${path.relative(REPO_ROOT, DST_WORKFLOW_PATH)} (${wf.nodes.length} nodes)`);
+}
+
+function buildSlaTickWorkflow() {
+  const rawWf = fs.readFileSync(SRC_WORKFLOW_PATH, 'utf8');
+  const srcWf = JSON.parse(rawWf);
+
+  const refPgNode = srcWf.nodes.find((n) => n.name === 'Load Clinic Context');
+  if (!refPgNode) {
+    throw new Error('Reference Postgres node "Load Clinic Context" not found');
+  }
+  const errorTriggerNode = srcWf.nodes.find((n) => n.name === 'Error Trigger');
+  if (!errorTriggerNode) {
+    throw new Error('Node "Error Trigger" not found in main workflow');
+  }
+  const logErrorNode = srcWf.nodes.find((n) => n.name === 'Log Workflow Error');
+  if (!logErrorNode) {
+    throw new Error('Node "Log Workflow Error" not found in main workflow');
+  }
+
+  const pgCredentials = JSON.parse(JSON.stringify(refPgNode.credentials));
+  const pgTypeVersion = refPgNode.typeVersion;
+
+  const nodes = [
+    {
+      parameters: {
+        rule: {
+          interval: [
+            {
+              field: 'minutes',
+              minutesInterval: 1,
+            },
+          ],
+        },
+      },
+      id: 'b1b2c3d4-0001-4000-8000-000000000001',
+      name: 'Schedule Trigger',
+      type: 'n8n-nodes-base.scheduleTrigger',
+      typeVersion: 1.4,
+      position: [240, 240],
+    },
+    {
+      parameters: {
+        operation: 'executeQuery',
+        query: L2V_ESCALATE_QUERY,
+        options: {
+          queryBatching: 'single',
+        },
+      },
+      id: 'b1b2c3d4-0002-4000-8000-000000000002',
+      name: 'Escalate Overdue Leads',
+      type: 'n8n-nodes-base.postgres',
+      typeVersion: pgTypeVersion,
+      position: [480, 240],
+      retryOnFail: true,
+      maxTries: 3,
+      waitBetweenTries: 1000,
+      credentials: pgCredentials,
+    },
+    JSON.parse(JSON.stringify(errorTriggerNode)),
+    JSON.parse(JSON.stringify(logErrorNode)),
+  ];
+
+  const slaWf = {
+    id: 'YOUR_WORKFLOW_ID',
+    name: 'ClinicOS L2V SLA Tick',
+    active: true,
+    isArchived: false,
+    versionId: 'YOUR_WORKFLOW_VERSION_ID',
+    activeVersionId: 'YOUR_WORKFLOW_VERSION_ID',
+    triggerCount: 2,
+    nodeCount: nodes.length,
+    createdAt: srcWf.createdAt,
+    updatedAt: srcWf.updatedAt,
+    settings: JSON.parse(JSON.stringify(srcWf.settings)),
+    tags: [],
+    parentFolderId: null,
+    description:
+      'ClinicOS Lead-to-Visit SLA tick: runs l2v.escalate_overdue() every minute and logs workflow errors.',
+    scopes: JSON.parse(JSON.stringify(srcWf.scopes)),
+    canExecute: true,
+    connections: {
+      'Schedule Trigger': {
+        main: [
+          [
+            {
+              node: 'Escalate Overdue Leads',
+              type: 'main',
+              index: 0,
+            },
+          ],
+        ],
+      },
+      'Error Trigger': {
+        main: [
+          [
+            {
+              node: 'Log Workflow Error',
+              type: 'main',
+              index: 0,
+            },
+          ],
+        ],
+      },
+    },
+    nodes,
+    nodeGroups: [],
+    activeVersion: {
+      sameAsDraft: true,
+    },
+    meta: JSON.parse(JSON.stringify(srcWf.meta)),
+  };
+
+  writeJsonIfChanged(SLA_WORKFLOW_PATH, slaWf);
+  console.log(`Built ${path.relative(REPO_ROOT, SLA_WORKFLOW_PATH)} (${slaWf.nodes.length} nodes)`);
 }
 
 if (require.main === module) {
   buildL2vWorkflow();
+  buildSlaTickWorkflow();
 }
 
-module.exports = { buildL2vWorkflow, L2V_GATE_QUERY, L2V_QUALIFY_QUERY };
+module.exports = {
+  buildL2vWorkflow,
+  buildSlaTickWorkflow,
+  L2V_GATE_QUERY,
+  L2V_QUALIFY_QUERY,
+  L2V_ESCALATE_QUERY,
+};
