@@ -1273,7 +1273,7 @@ return {
     target_appointment_id: targetApptId,
     service_id: shouldQuerySlots ? service.id : null,
     service_code: shouldQuerySlots ? service.code : null,
-    service_name_ar: shouldQuerySlots ? service.name_ar : null,
+    service_name_ar: (shouldQuerySlots || (Boolean(explicitService) && !suppressLeadSignals)) ? service.name_ar : null,
     service_name_en: shouldQuerySlots ? service.name_en : null,
     provider_id: shouldQuerySlots ? (matchedProvider?.id ?? null) : null,
     requested_from: shouldQuerySlots ? effectiveFrom : null,
