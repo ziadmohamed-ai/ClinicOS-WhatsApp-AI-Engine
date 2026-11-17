@@ -304,7 +304,7 @@ do $$
 begin
   insert into public.clinics (id, name, timezone, settings)
   values (
-    '5b201616-fdf0-4a37-8863-bd050ea90376',
+    '00000000-0000-4000-8000-000000000099',
     'Seed Example Clinic',
     'Africa/Cairo',
     jsonb_build_object(
@@ -320,28 +320,36 @@ begin
   );
 end $$;
 
--- First run of 05b_l2v_seed_example.sql
+-- First run of 05b_l2v_seed_example.sql (multi-clinic test DB: verify 05b refuses ambiguity without clinicos.seed_clinic_id, then runs cleanly with it)
+do $$
+declare
+  v_cnt integer;
+begin
+  select count(*)::int into v_cnt from public.clinics;
+  assert v_cnt > 1, 'Expected >1 clinics in test DB before T7';
+end $$;
+set session clinicos.seed_clinic_id = '00000000-0000-4000-8000-000000000099';
 \i :repo/database/05b_l2v_seed_example.sql
 
 create temp table _t7_snapshot as
 select
-  (select count(*)::int from public.contacts where clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as clinic_contacts_cnt,
+  (select count(*)::int from public.contacts where clinic_id = '00000000-0000-4000-8000-000000000099') as clinic_contacts_cnt,
   (select count(*)::int from public.contacts) as total_contacts_cnt,
-  (select count(*)::int from l2v.settings where clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as clinic_settings_cnt,
+  (select count(*)::int from l2v.settings where clinic_id = '00000000-0000-4000-8000-000000000099') as clinic_settings_cnt,
   (select count(*)::int from l2v.settings) as total_settings_cnt,
-  (select count(*)::int from l2v.reps where clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as clinic_reps_cnt,
+  (select count(*)::int from l2v.reps where clinic_id = '00000000-0000-4000-8000-000000000099') as clinic_reps_cnt,
   (select count(*)::int from l2v.reps) as total_reps_cnt,
-  (select settings from public.clinics where id = '5b201616-fdf0-4a37-8863-bd050ea90376') as clinic_settings_json,
+  (select settings from public.clinics where id = '00000000-0000-4000-8000-000000000099') as clinic_settings_json,
   (select jsonb_agg(to_jsonb(c) order by c.phone_e164)
      from public.contacts c
-    where c.clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as contacts_rows,
+    where c.clinic_id = '00000000-0000-4000-8000-000000000099') as contacts_rows,
   (select to_jsonb(s)
      from l2v.settings s
-    where s.clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as l2v_settings_row;
+    where s.clinic_id = '00000000-0000-4000-8000-000000000099') as l2v_settings_row;
 
 do $$
 declare
-  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_seed_clinic uuid := '00000000-0000-4000-8000-000000000099';
   v_mgr_id      uuid;
   v_settings    jsonb;
   v_sla         integer;
@@ -400,14 +408,14 @@ end $$;
 create temp table _t7_reps_before_second_run as
 select jsonb_agg(to_jsonb(r) order by r.contact_id) as reps_rows
   from l2v.reps r
- where r.clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376';
+ where r.clinic_id = '00000000-0000-4000-8000-000000000099';
 
 -- Second run of 05b_l2v_seed_example.sql (must be a complete no-op)
 \i :repo/database/05b_l2v_seed_example.sql
 
 do $$
 declare
-  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_seed_clinic uuid := '00000000-0000-4000-8000-000000000099';
   v_snap        record;
   v_reps_snap   jsonb;
 begin
@@ -448,7 +456,7 @@ end $$;
 -- does not overwrite staff configuration or existing whatsapp_templates entries.
 do $$
 declare
-  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_seed_clinic uuid := '00000000-0000-4000-8000-000000000099';
   v_real_mgr    uuid;
   v_rep1        uuid;
 begin
@@ -482,7 +490,7 @@ end $$;
 
 do $$
 declare
-  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_seed_clinic uuid := '00000000-0000-4000-8000-000000000099';
   v_real_mgr    uuid;
   v_rep1        uuid;
   v_sla         integer;
@@ -521,7 +529,7 @@ end $$;
 --     escalate_overdue clinic scope, and kpi_daily outbox auto-reply latency)
 do $$
 declare
-  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_seed_clinic uuid := '00000000-0000-4000-8000-000000000099';
   v_rep1_cid    uuid;
   v_rep2_cid    uuid;
   v_pat_a       uuid;
@@ -663,5 +671,6 @@ do $$ begin
   raise notice 'runtime role close_lead allowed';
 end $$;
 reset role;
+reset clinicos.seed_clinic_id;
 
 

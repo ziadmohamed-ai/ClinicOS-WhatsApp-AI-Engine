@@ -67,7 +67,7 @@ function runPipelineTurn({
       ok: true,
       messages: [
         {
-          clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+          clinic_id: '00000000-0000-4000-8000-000000000001',
           contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
           conversation_id: '789d0dde-6927-47b5-b193-8828d2cdc1fd',
           message_id: '00000000-0000-0000-0000-000000000001',
@@ -96,7 +96,7 @@ function runPipelineTurn({
   const loadClinicCtxItem = {
     event: turnEvent,
     clinic_snapshot: {
-      id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+      id: '00000000-0000-4000-8000-000000000001',
       name: 'عيادة ClinicOS التخصصية',
       timezone: 'Asia/Riyadh',
       utc_offset: '+03:00',
@@ -1963,13 +1963,13 @@ function runL2vPrepare(itemJson) {
 addTest('L2V Prepare: ad message with referral.headline extracts click_to_whatsapp and headline campaign', 'Lead-to-Visit', () => {
   const referral = { headline: 'Summer Veneers Offer', source_id: 'ad_101', ctwa_clid: 'clid_xyz' };
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '201001234567',
     message_timestamp: '2026-11-11T09:00:00Z',
     payload: { type: 'text', text: { body: 'بكام التبييض' }, referral }
   });
-  assert.strictEqual(out.clinic_id, '5b201616-fdf0-4a37-8863-bd050ea90376');
+  assert.strictEqual(out.clinic_id, '00000000-0000-4000-8000-000000000001');
   assert.strictEqual(out.contact_id, 'cac3cdbc-ab13-414b-acff-f1adc214e340');
   assert.strictEqual(out.phone_e164, '+201001234567');
   assert.strictEqual(out.source, 'click_to_whatsapp');
@@ -1981,7 +1981,7 @@ addTest('L2V Prepare: ad message with referral.headline extracts click_to_whatsa
 addTest('L2V Prepare: referral with blank headline falls back to referral.source_id', 'Lead-to-Visit', () => {
   const referral = { headline: '   ', source_id: 'ad_202', source_type: 'ad' };
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '+201001234567',
     message_timestamp: '2026-11-11T10:30:00+02:00',
@@ -1995,7 +1995,7 @@ addTest('L2V Prepare: referral with blank headline falls back to referral.source
 
 addTest('L2V Prepare: organic message without referral emits organic source and null campaign/referral', 'Lead-to-Visit', () => {
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '+201001234567',
     message_timestamp: '2026-11-11T12:00:00Z',
@@ -2031,7 +2031,7 @@ addTest('L2V Prepare: never throws on missing, null, or malformed fields and ret
 
 addTest('L2V Prepare: falls back to Meta payload.timestamp unix seconds when message_timestamp is absent', 'Lead-to-Visit', () => {
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '201001234567',
     payload: { timestamp: '1762851600' }
@@ -2043,7 +2043,7 @@ addTest('L2V Prepare: falls back to Meta payload.timestamp unix seconds when mes
 addTest('L2V Prepare: caps campaign at 200 characters on a 5000-character headline', 'Lead-to-Visit', () => {
   const longHeadline = 'A'.repeat(5000);
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '+201001234567',
     payload: { referral: { headline: longHeadline, source_id: 'ad_long' } }
@@ -2461,6 +2461,57 @@ addTest('Main & L2V Workflow Audit Validator Mutations: rejects 7 reverted workf
   const l2vWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.l2v.json'));
   assert.strictEqual(runMainWorkflowAuditMutationTests(origWf), 7);
   assert.strictEqual(runMainWorkflowAuditMutationTests(l2vWf), 7);
+});
+
+addTest('T9 Multi-Clinic: legacy hard-coded clinic UUID is absent from database, workflow, nodes, prompts, scripts, tests, docs, and dashboard', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const repoRoot = path.resolve(__dirname, '..');
+  const legacyPrefix = '5b20' + '1616';
+  const legacyFull = legacyPrefix + '-fdf0-4a37-8863-bd050ea90376';
+  const scanDirs = ['database', 'workflow', 'nodes', 'prompts', 'scripts', 'tests', 'docs', 'dashboard'];
+  const hits = [];
+
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile()) {
+        const content = fs.readFileSync(full, 'utf8');
+        if (content.includes(legacyPrefix) || content.includes(legacyFull)) {
+          hits.push(path.relative(repoRoot, full));
+        }
+      }
+    }
+  }
+
+  for (const d of scanDirs) {
+    const abs = path.join(repoRoot, d);
+    if (fs.existsSync(abs)) walk(abs);
+  }
+
+  assert.deepStrictEqual(
+    hits,
+    [],
+    `Legacy hard-coded clinic UUID (${legacyFull}) found in: ${hits.join(', ')}`
+  );
+});
+
+addTest('T9 Multi-Clinic: database/03_rls_policies.sql requires :clinic_id and log_workflow_error requires single clinic row', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const repoRoot = path.resolve(__dirname, '..');
+  const rlsSql = fs.readFileSync(path.join(repoRoot, 'database', '03_rls_policies.sql'), 'utf8');
+  assert.ok(rlsSql.includes('\\if :{?clinic_id}'), '03_rls_policies.sql must check \\if :{?clinic_id}');
+  assert.ok(rlsSql.includes('Missing required psql variable clinic_id'), '03_rls_policies.sql must raise clear missing-variable error');
+  assert.ok(rlsSql.includes("(:'clinic_id')::uuid"), "03_rls_policies.sql must parameterize policies with (:'clinic_id')::uuid");
+
+  const rpcSql = fs.readFileSync(path.join(repoRoot, 'database', '02_booking_and_outbox_rpcs.sql'), 'utf8');
+  assert.ok(
+    rpcSql.includes('log_workflow_error requires exactly 1 clinic row in public.clinics'),
+    'log_workflow_error must raise clear error when clinic count <> 1'
+  );
 });
 
 // ============================================================================

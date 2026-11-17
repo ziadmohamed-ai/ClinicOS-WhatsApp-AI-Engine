@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Runs a full clean install (database/01, 02, 02a, 03, 04, 05, 05b) on an EMPTY scratch Postgres
-# with ON_ERROR_STOP=1 and default check_function_bodies=on, then verifies every public.<fn>(...)
-# call in workflow/clinicos-main-engine.json and workflow/clinicos-main-engine.l2v.json exists in pg_proc
-# with a matching argument count.
+# with ON_ERROR_STOP=1 and default check_function_bodies=on, verifies RLS clinic_id guards & isolation,
+# verifies workflow pg_proc signatures, and (on default run) exercises scripts/new_clinic.sh end-to-end.
 #
 # Optional flags / env:
 #   --seed <path>          override seed SQL file (default: database/04_seed_data.sql)
-#   --clinic-id <uuid>     pass -v clinic_id=<uuid> to psql (used from T9 onwards)
+#   --clinic-id <uuid>     pass -v clinic_id=<uuid> to psql (default: 00000000-0000-4000-8000-000000000001)
 #   CLINICOS_SKIP_02A=1    skip database/02a_live_sync_profile_and_slots.sql (mutation test)
 set -euo pipefail
 
@@ -30,6 +29,17 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+DEFAULT_RUN=0
+if [ -z "$SEED_OVERRIDE" ] && [ -z "$CLINIC_ID_ARG" ]; then
+  DEFAULT_RUN=1
+  CLINIC_ID_ARG="00000000-0000-4000-8000-000000000001"
+fi
+
+if [ -z "$CLINIC_ID_ARG" ]; then
+  echo "ERROR: --clinic-id is required when --seed is specified" >&2
+  exit 2
+fi
 
 if ls -d /usr/lib/postgresql/*/bin >/dev/null 2>&1; then
   PGBIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
@@ -58,10 +68,6 @@ to_mixed_path() {
   fi
 }
 
-to_bslash_path() {
-  to_mixed_path "$1" | tr '/' '\\'
-}
-
 if [ "$IS_WIN" -eq 1 ]; then
   REPO_PG="$(to_mixed_path "$REPO")"
   WORK_POSIX="$(mktemp -d "${TMPDIR:-/tmp}/clinicos_clean.XXXXXX")"
@@ -72,6 +78,7 @@ if [ "$IS_WIN" -eq 1 ]; then
   WF_SQL_PG="$(to_mixed_path "$WF_SQL_POSIX")"
   EMPTY_SQL_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_empty.XXXXXX.sql")"
   EMPTY_SQL_PG="$(to_mixed_path "$EMPTY_SQL_POSIX")"
+  NEW_SEED_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_new_clinic.XXXXXX.sql")"
 else
   REPO_PG="$REPO"
   if [ "$(id -u)" = 0 ] && [ -d /var/lib/postgresql ]; then
@@ -85,6 +92,7 @@ else
   WF_SQL_PG="$WF_SQL_POSIX"
   EMPTY_SQL_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_empty.XXXXXX.sql")"
   EMPTY_SQL_PG="$EMPTY_SQL_POSIX"
+  NEW_SEED_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_new_clinic.XXXXXX.sql")"
 fi
 
 echo "-- skipped 02a (CLINICOS_SKIP_02A=1)" > "$EMPTY_SQL_POSIX"
@@ -107,9 +115,9 @@ fi
 
 run_pg() {
   if [ "$IS_WIN" -eq 0 ] && [ "$(id -u)" = 0 ]; then
-    su postgres -s /bin/bash -c "$1"
+    su postgres -s /bin/"${BASH:-sh}" -c "$1"
   else
-    bash -c "$1"
+    "${BASH:-sh}" -c "$1"
   fi
 }
 
@@ -253,37 +261,66 @@ chmod 644 "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX" 2>/dev/null || true
 
 cleanup() {
   if [ "$IS_WIN" -eq 1 ]; then
-    "$PGBIN/pg_ctl" -D "$WORK_PG" -m immediate stop >/dev/null 2>&1 || true
-    rm -rf "$WORK_POSIX" "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX"
+    "$PGBIN/pg_ctl" -D "$WORK_PG" -m immediate stop </dev/null >/dev/null 2>&1 || true
+    rm -rf "$WORK_POSIX" "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX" "$NEW_SEED_POSIX"
   else
     run_pg "'$PGBIN/pg_ctl' -D '$WORK_PG' stop -m fast >/dev/null 2>&1 || true; rm -rf '$WORK_PG'"
-    rm -f "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX"
+    rm -f "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX" "$NEW_SEED_POSIX"
   fi
 }
 trap cleanup EXIT
 
-PSQL_CLINIC_OPT=()
-if [ -n "$CLINIC_ID_ARG" ]; then
-  PSQL_CLINIC_OPT=(-v "clinic_id=$CLINIC_ID_ARG")
-fi
-
 if [ "$IS_WIN" -eq 1 ]; then
   "$PGBIN/initdb" -D "$WORK_PG" -U postgres -A trust --encoding=UTF8 --locale=C >/dev/null
   "$PGBIN/pg_ctl" -D "$WORK_PG" -l "$WORK_PG/log" -o "-p $PORT -h 127.0.0.1" -w start </dev/null >/dev/null 2>&1
+
+  # Verify database/03_rls_policies.sql fails with a clear error when clinic_id is missing
+  if [ "$DEFAULT_RUN" -eq 1 ]; then
+    set +e
+    MISSING_ERR="$("$PGBIN/psql" -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$REPO_PG/database/03_rls_policies.sql" 2>&1)"
+    MISSING_RC=$?
+    set -e
+    if [ "$MISSING_RC" -eq 0 ] || ! printf '%s' "$MISSING_ERR" | grep -q "Missing required psql variable clinic_id"; then
+      echo "ERROR: Expected 03_rls_policies.sql without -v clinic_id to fail clearly, got rc=$MISSING_RC: $MISSING_ERR" >&2
+      exit 1
+    fi
+  fi
+
   "$PGBIN/psql" -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
-    "${PSQL_CLINIC_OPT[@]}" \
+    -v "clinic_id=$CLINIC_ID_ARG" \
     -v "repo=$REPO_PG" \
     -v "step_02a=$STEP_02A_PG" \
     -v "seed_sql=$SEED_PG" \
     -v "wf_checks_sql=$WF_SQL_PG" \
     -f "$REPO_PG/tests/clean_install_test.sql"
 else
-  CLINIC_FLAG=""
-  if [ -n "$CLINIC_ID_ARG" ]; then
-    CLINIC_FLAG="-v 'clinic_id=$CLINIC_ID_ARG'"
-  fi
   run_pg "'$PGBIN/initdb' -D '$WORK_PG' -A trust --encoding=UTF8 --locale=C >/dev/null && '$PGBIN/pg_ctl' -D '$WORK_PG' -o '-p $PORT -k /tmp' -l '$WORK_PG/log' -w start >/dev/null"
-  run_pg "'$PGBIN/psql' -h /tmp -p '$PORT' -d postgres -v ON_ERROR_STOP=1 $CLINIC_FLAG -v 'repo=$REPO_PG' -v 'step_02a=$STEP_02A_PG' -v 'seed_sql=$SEED_PG' -v 'wf_checks_sql=$WF_SQL_PG' -f '$REPO_PG/tests/clean_install_test.sql'"
+
+  if [ "$DEFAULT_RUN" -eq 1 ]; then
+    set +e
+    MISSING_ERR="$(run_pg "'$PGBIN/psql' -h /tmp -p '$PORT' -d postgres -v ON_ERROR_STOP=1 -f '$REPO_PG/database/03_rls_policies.sql'" 2>&1)"
+    MISSING_RC=$?
+    set -e
+    if [ "$MISSING_RC" -eq 0 ] || ! printf '%s' "$MISSING_ERR" | grep -q "Missing required psql variable clinic_id"; then
+      echo "ERROR: Expected 03_rls_policies.sql without -v clinic_id to fail clearly, got rc=$MISSING_RC: $MISSING_ERR" >&2
+      exit 1
+    fi
+  fi
+
+  run_pg "'$PGBIN/psql' -h /tmp -p '$PORT' -d postgres -v ON_ERROR_STOP=1 -v 'clinic_id=$CLINIC_ID_ARG' -v 'repo=$REPO_PG' -v 'step_02a=$STEP_02A_PG' -v 'seed_sql=$SEED_PG' -v 'wf_checks_sql=$WF_SQL_PG' -f '$REPO_PG/tests/clean_install_test.sql'"
+fi
+
+# On default run (when 02a is not skipped), exercise scripts/new_clinic.sh through a fresh clean install
+if [ "$DEFAULT_RUN" -eq 1 ] && [ "${CLINICOS_SKIP_02A:-0}" != "1" ]; then
+  NEW_OUT="$("${BASH:-sh}" "$REPO/scripts/new_clinic.sh" --name "عيادة النور التخصصية" --phone-number-id "YOUR_STAGING_PHONE_ID" --out "$NEW_SEED_POSIX")"
+  NEW_CLINIC_ID="$(printf '%s\n' "$NEW_OUT" | sed -n 's/^CLINIC_ID=//p' | tr -d '\r' | head -n 1)"
+  if [ -z "$NEW_CLINIC_ID" ]; then
+    echo "ERROR: scripts/new_clinic.sh did not emit CLINIC_ID" >&2
+    exit 1
+  fi
+  chmod 644 "$NEW_SEED_POSIX" 2>/dev/null || true
+  CLINICOS_CLEAN_PGPORT=$((PORT + 1)) "${BASH:-sh}" "$REPO/tests/clean_install_test.sh" --seed "$NEW_SEED_POSIX" --clinic-id "$NEW_CLINIC_ID"
+  echo "new_clinic.sh clean-install verification: OK"
 fi
 
 echo "Clean install test: OK"

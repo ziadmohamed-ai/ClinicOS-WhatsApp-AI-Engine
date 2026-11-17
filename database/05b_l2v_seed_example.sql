@@ -14,6 +14,7 @@
 do $$
 declare
   v_clinic_id       uuid;
+  v_clinic_count    integer;
   v_mgr_contact_id  uuid;
   v_rep1_contact_id uuid;
   v_rep2_contact_id uuid;
@@ -32,15 +33,20 @@ declare
     )
   );
 begin
-  -- Resolve target clinic: demo clinic from 04_seed_data.sql if present,
-  -- otherwise the oldest clinic row (e.g. in a test or single-clinic install).
-  v_clinic_id := coalesce(
-    (select id from public.clinics where id = '5b201616-fdf0-4a37-8863-bd050ea90376'),
-    (select id from public.clinics order by created_at limit 1)
-  );
+  -- Resolve target clinic: explicit session setting clinicos.seed_clinic_id if provided,
+  -- otherwise require a single clinic row in public.clinics (one Supabase project per clinic).
+  v_clinic_id := nullif(btrim(coalesce(current_setting('clinicos.seed_clinic_id', true), '')), '')::uuid;
 
   if v_clinic_id is null then
-    raise exception 'No clinic found in public.clinics. Seed a clinic before running 05b_l2v_seed_example.sql.';
+    select count(*)::int, (array_agg(id))[1]
+      into v_clinic_count, v_clinic_id
+      from public.clinics;
+
+    if v_clinic_count = 0 then
+      raise exception 'No clinic found in public.clinics. Seed a clinic before running 05b_l2v_seed_example.sql.';
+    elsif v_clinic_count > 1 then
+      raise exception 'Multiple clinics (%) found in public.clinics; set clinicos.seed_clinic_id before running 05b_l2v_seed_example.sql.', v_clinic_count;
+    end if;
   end if;
 
   -- 1. Insert example manager and two reception reps into public.contacts

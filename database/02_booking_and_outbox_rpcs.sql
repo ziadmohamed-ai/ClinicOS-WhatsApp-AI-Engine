@@ -2380,6 +2380,7 @@ CREATE OR REPLACE FUNCTION public.log_workflow_error(p_workflow_name text, p_exe
 AS $function$
 DECLARE
   v_clinic_id uuid;
+  v_clinic_count integer;
   v_event_id bigint;
   v_exec_id text := nullif(left(btrim(coalesce(p_execution_id, '')), 64), '');
   v_node text := coalesce(nullif(left(btrim(coalesce(p_last_node, '')), 120), ''), 'unknown');
@@ -2392,9 +2393,12 @@ BEGIN
     RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
   END IF;
 
-  SELECT id INTO v_clinic_id FROM public.clinics LIMIT 1;
-  IF v_clinic_id IS NULL THEN
-    v_clinic_id := '5b201616-fdf0-4a37-8863-bd050ea90376'::uuid;
+  SELECT count(*)::int, (array_agg(id))[1]
+    INTO v_clinic_count, v_clinic_id
+    FROM public.clinics;
+
+  IF v_clinic_count <> 1 THEN
+    RAISE EXCEPTION 'log_workflow_error requires exactly 1 clinic row in public.clinics (found %)', v_clinic_count;
   END IF;
 
   INSERT INTO public.system_events (
