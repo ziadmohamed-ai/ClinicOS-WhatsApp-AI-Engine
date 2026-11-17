@@ -364,6 +364,10 @@ function validateSlaTickContract(origWf, slaWf) {
     4,
     `SLA tick workflow must have exactly 4 nodes, got ${slaWf.nodes.length}`
   );
+  for (const n of slaWf.nodes) {
+    assert.ok(!n.disabled, `Node "${n.name}" in SLA tick workflow must not have disabled: true`);
+    assert.ok(!n.continueOnFail, `Node "${n.name}" in SLA tick workflow must not set continueOnFail: true`);
+  }
 
   const scheduleNodes = slaWf.nodes.filter((n) => n.type === 'n8n-nodes-base.scheduleTrigger');
   assert.strictEqual(scheduleNodes.length, 1, 'SLA tick workflow must have exactly 1 Schedule Trigger node');
@@ -403,11 +407,6 @@ function validateSlaTickContract(origWf, slaWf) {
   assert.strictEqual(escalateNode.retryOnFail, true, 'Escalate Postgres node must set retryOnFail: true');
   assert.strictEqual(escalateNode.maxTries, 3, 'Escalate Postgres node must set maxTries: 3');
   assert.strictEqual(escalateNode.waitBetweenTries, 1000, 'Escalate Postgres node must set waitBetweenTries: 1000');
-  assert.strictEqual(
-    escalateNode.credentials?.postgres?.id,
-    'YOUR_POSTGRES_CREDENTIAL_ID',
-    'Escalate Postgres node must use placeholder credential YOUR_POSTGRES_CREDENTIAL_ID'
-  );
 
   const escalateOut = slaWf.connections[escalateNode.name];
   assert.ok(
@@ -423,6 +422,24 @@ function validateSlaTickContract(origWf, slaWf) {
 
   assert.ok(slaErrorTrigger, 'SLA tick workflow must include "Error Trigger"');
   assert.ok(slaLogError, 'SLA tick workflow must include "Log Workflow Error"');
+
+  for (const pgNode of [escalateNode, slaLogError]) {
+    assert.ok(
+      pgNode.onError === undefined || pgNode.onError === 'stopWorkflow',
+      `Postgres node "${pgNode.name}" in SLA tick workflow must not swallow errors with onError: ${JSON.stringify(pgNode.onError)}`
+    );
+    assert.strictEqual(
+      pgNode.credentials?.postgres?.id,
+      'YOUR_POSTGRES_CREDENTIAL_ID',
+      `Postgres node "${pgNode.name}" must use placeholder credential YOUR_POSTGRES_CREDENTIAL_ID`
+    );
+    assert.strictEqual(
+      pgNode.credentials?.postgres?.name,
+      'ClinicOS Runtime PostgreSQL',
+      `Postgres node "${pgNode.name}" must use credential name "ClinicOS Runtime PostgreSQL", got ${JSON.stringify(pgNode.credentials?.postgres?.name)}`
+    );
+  }
+
   assert.strictEqual(
     JSON.stringify(slaErrorTrigger),
     JSON.stringify(origErrorTrigger),
@@ -528,6 +545,64 @@ function runSlaTickMutationTests(origWf, slaWf) {
     /"Log Workflow Error" in SLA tick workflow must match "Log Workflow Error" in clinicos-main-engine\.json/,
     'Mutation 7 (mismatched Log Workflow Error node) must be rejected'
   );
+
+  // Mutation 8: disabled: true on Schedule Trigger (or Escalate Overdue Leads)
+  assert.throws(
+    () => {
+      const m = clone();
+      const sched = m.nodes.find((n) => n.name === 'Schedule Trigger');
+      sched.disabled = true;
+      validateSlaTickContract(origWf, m);
+    },
+    /Node "Schedule Trigger" in SLA tick workflow must not have disabled: true/,
+    'Mutation 8 (disabled: true on Schedule Trigger) must be rejected'
+  );
+  assert.throws(
+    () => {
+      const m = clone();
+      const esc = m.nodes.find((n) => n.name === 'Escalate Overdue Leads');
+      esc.disabled = true;
+      validateSlaTickContract(origWf, m);
+    },
+    /Node "Escalate Overdue Leads" in SLA tick workflow must not have disabled: true/,
+    'Mutation 8b (disabled: true on Escalate Overdue Leads) must be rejected'
+  );
+
+  // Mutation 9: onError: 'continueRegularOutput' (and 'continueErrorOutput') on Escalate Overdue Leads
+  assert.throws(
+    () => {
+      const m = clone();
+      const esc = m.nodes.find((n) => n.name === 'Escalate Overdue Leads');
+      esc.onError = 'continueRegularOutput';
+      validateSlaTickContract(origWf, m);
+    },
+    /Postgres node "Escalate Overdue Leads" in SLA tick workflow must not swallow errors with onError: "continueRegularOutput"/,
+    'Mutation 9 (onError: continueRegularOutput on Escalate Overdue Leads) must be rejected'
+  );
+  assert.throws(
+    () => {
+      const m = clone();
+      const esc = m.nodes.find((n) => n.name === 'Escalate Overdue Leads');
+      esc.onError = 'continueErrorOutput';
+      validateSlaTickContract(origWf, m);
+    },
+    /Postgres node "Escalate Overdue Leads" in SLA tick workflow must not swallow errors with onError: "continueErrorOutput"/,
+    'Mutation 9b (onError: continueErrorOutput on Escalate Overdue Leads) must be rejected'
+  );
+
+  // Mutation 10: credentials.postgres.name changed from 'ClinicOS Runtime PostgreSQL' to 'Wrong Credential Name'
+  assert.throws(
+    () => {
+      const m = clone();
+      const esc = m.nodes.find((n) => n.name === 'Escalate Overdue Leads');
+      esc.credentials.postgres.name = 'Wrong Credential Name';
+      validateSlaTickContract(origWf, m);
+    },
+    /Postgres node "Escalate Overdue Leads" must use credential name "ClinicOS Runtime PostgreSQL"/,
+    'Mutation 10 (wrong credentials.postgres.name) must be rejected'
+  );
+
+  return 10;
 }
 
 function main() {

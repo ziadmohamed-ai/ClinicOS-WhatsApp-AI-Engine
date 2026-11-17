@@ -2343,12 +2343,13 @@ addTest('L2V SLA Tick Workflow: clinicos-l2v-sla-tick.json passes structural and
   assert.strictEqual(slaWf.nodes.length, 4);
 });
 
-addTest('L2V SLA Tick Workflow Validator Mutations: rejects 7 distinct invalid mutations in memory', 'Lead-to-Visit', () => {
+addTest('L2V SLA Tick Workflow Validator Mutations: rejects 10 distinct invalid mutations in memory', 'Lead-to-Visit', () => {
   const path = require('path');
   const { validateStructure, runSlaTickMutationTests } = require('./validate_workflow.js');
   const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
   const slaWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-l2v-sla-tick.json'));
-  runSlaTickMutationTests(origWf, slaWf);
+  const count = runSlaTickMutationTests(origWf, slaWf);
+  assert.strictEqual(count, 10);
 });
 
 // ============================================================================
