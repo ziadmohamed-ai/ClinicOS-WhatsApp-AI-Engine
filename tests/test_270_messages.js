@@ -2040,6 +2040,19 @@ addTest('L2V Prepare: falls back to Meta payload.timestamp unix seconds when mes
   assert.strictEqual(out.message_timestamp, '2025-11-11T09:00:00.000Z');
 });
 
+addTest('L2V Prepare: caps campaign at 200 characters on a 5000-character headline', 'Lead-to-Visit', () => {
+  const longHeadline = 'A'.repeat(5000);
+  const out = runL2vPrepare({
+    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
+    phone: '+201001234567',
+    payload: { referral: { headline: longHeadline, source_id: 'ad_long' } }
+  });
+  assert.strictEqual(out.source, 'click_to_whatsapp');
+  assert.strictEqual(out.campaign.length, 200);
+  assert.strictEqual(out.campaign, 'A'.repeat(200));
+});
+
 // ============================================================================
 // EXECUTE ALL 270 TESTS & REPORT SUMMARY
 // ============================================================================

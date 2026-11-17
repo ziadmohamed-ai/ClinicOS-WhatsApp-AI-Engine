@@ -186,7 +186,7 @@ begin
   return query
   insert into l2v.leads as l
          (clinic_id, contact_id, source, campaign, treatment_interest, referral, first_inbound_at)
-  values (p_clinic_id, p_contact_id, p_source, p_campaign, p_treatment, p_referral, p_received_at)
+  values (p_clinic_id, p_contact_id, p_source, p_campaign, p_treatment, p_referral, coalesce(p_received_at, now()))
   on conflict (contact_id) where status <> 'closed'
   do update set
     campaign           = coalesce(l.campaign, excluded.campaign),

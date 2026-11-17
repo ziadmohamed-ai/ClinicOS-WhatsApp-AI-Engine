@@ -60,9 +60,10 @@ const candidateReferral =
 const hasReferral = candidateReferral !== null && Object.keys(candidateReferral).length > 0;
 const referral = hasReferral ? candidateReferral : null;
 const source = hasReferral ? "click_to_whatsapp" : "organic";
-const campaign = hasReferral
+const rawCampaign = hasReferral
   ? (trimOrNull(candidateReferral.headline) ?? trimOrNull(candidateReferral.source_id) ?? null)
   : null;
+const campaign = rawCampaign !== null ? rawCampaign.slice(0, 200) : null;
 
 const message_timestamp =
   parseIsoOrNull(ev.message_timestamp) ??
