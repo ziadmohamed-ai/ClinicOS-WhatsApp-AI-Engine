@@ -297,3 +297,149 @@ do $$ begin
   exception when insufficient_privilege then raise notice 'runtime role: functions yes, tables no'; end;
 end $$;
 reset role;
+
+-- 11. T7: database/05b_l2v_seed_example.sql double-execution idempotency & merge test
+do $$
+begin
+  insert into public.clinics (id, name, timezone, settings)
+  values (
+    '5b201616-fdf0-4a37-8863-bd050ea90376',
+    'Seed Example Clinic',
+    'Africa/Cairo',
+    jsonb_build_object(
+      'whatsapp_phone_number_id', 'YOUR_META_PHONE_NUMBER_ID',
+      'slot_step_minutes', 30,
+      'whatsapp_templates', jsonb_build_object(
+        'appointment_reminder', jsonb_build_object(
+          'name', 'appointment_reminder',
+          'language_codes', jsonb_build_object('ar', 'ar')
+        )
+      )
+    )
+  );
+end $$;
+
+-- First run of 05b_l2v_seed_example.sql
+\i :repo/database/05b_l2v_seed_example.sql
+
+create temp table _t7_snapshot as
+select
+  (select count(*)::int from public.contacts where clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as clinic_contacts_cnt,
+  (select count(*)::int from public.contacts) as total_contacts_cnt,
+  (select count(*)::int from l2v.settings where clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as clinic_settings_cnt,
+  (select count(*)::int from l2v.settings) as total_settings_cnt,
+  (select count(*)::int from l2v.reps where clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as clinic_reps_cnt,
+  (select count(*)::int from l2v.reps) as total_reps_cnt,
+  (select settings from public.clinics where id = '5b201616-fdf0-4a37-8863-bd050ea90376') as clinic_settings_json,
+  (select jsonb_agg(to_jsonb(c) order by c.phone_e164)
+     from public.contacts c
+    where c.clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as contacts_rows,
+  (select to_jsonb(s)
+     from l2v.settings s
+    where s.clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376') as l2v_settings_row;
+
+do $$
+declare
+  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_mgr_id      uuid;
+  v_settings    jsonb;
+  v_sla         integer;
+  v_sla_mgr     uuid;
+begin
+  -- Verify manager contact (+201000000001) and 2 reps (+201000000002, +201000000003)
+  select id into v_mgr_id
+    from public.contacts
+   where clinic_id = v_seed_clinic and phone_e164 = '+201000000001';
+  assert v_mgr_id is not null, 'T7 first run: manager contact +201000000001 seeded';
+
+  assert (select count(*) from public.contacts
+           where clinic_id = v_seed_clinic
+             and phone_e164 in ('+201000000001', '+201000000002', '+201000000003')) = 3,
+    'T7 first run: all 3 fake staff contacts seeded';
+
+  -- Verify 15-minute SLA in l2v.settings linked to manager_contact_id
+  select sla_minutes, manager_contact_id into v_sla, v_sla_mgr
+    from l2v.settings
+   where clinic_id = v_seed_clinic;
+  assert v_sla = 15 and v_sla_mgr = v_mgr_id,
+    'T7 first run: l2v.settings has sla_minutes=15 and manager_contact_id';
+
+  -- Verify 2 active reps in l2v.reps
+  assert (select count(*) from l2v.reps where clinic_id = v_seed_clinic and is_active) = 2,
+    'T7 first run: 2 active reps in l2v.reps';
+  assert l2v.is_staff(v_seed_clinic, '+201000000001'), 'T7 first run: +201000000001 is_staff';
+  assert l2v.is_staff(v_seed_clinic, '+201000000002'), 'T7 first run: +201000000002 is_staff';
+  assert l2v.is_staff(v_seed_clinic, '+201000000003'), 'T7 first run: +201000000003 is_staff';
+
+  -- Verify clinics.settings merged the 3 whatsapp_templates keys without wiping existing keys
+  select settings into v_settings from public.clinics where id = v_seed_clinic;
+  assert v_settings ->> 'whatsapp_phone_number_id' = 'YOUR_META_PHONE_NUMBER_ID',
+    'T7 first run: preserved existing settings key whatsapp_phone_number_id';
+  assert (v_settings ->> 'slot_step_minutes')::int = 30,
+    'T7 first run: preserved existing settings key slot_step_minutes';
+  assert v_settings #>> '{whatsapp_templates,appointment_reminder,name}' = 'appointment_reminder',
+    'T7 first run: preserved existing whatsapp_templates.appointment_reminder';
+  assert v_settings #>> '{whatsapp_templates,lead_handoff,name}' = 'lead_handoff'
+     and v_settings #>> '{whatsapp_templates,lead_handoff,language_codes,ar}' = 'ar',
+    'T7 first run: seeded whatsapp_templates.lead_handoff';
+  assert v_settings #>> '{whatsapp_templates,sla_breach,name}' = 'sla_breach'
+     and v_settings #>> '{whatsapp_templates,sla_breach,language_codes,ar}' = 'ar',
+    'T7 first run: seeded whatsapp_templates.sla_breach';
+  assert v_settings #>> '{whatsapp_templates,sla_breach_no_rep,name}' = 'sla_breach_no_rep'
+     and v_settings #>> '{whatsapp_templates,sla_breach_no_rep,language_codes,ar}' = 'ar',
+    'T7 first run: seeded whatsapp_templates.sla_breach_no_rep';
+
+  -- Set a non-null last_assigned_at on rep 1 before the second run to verify it is not wiped
+  update l2v.reps
+     set last_assigned_at = '2026-01-15 10:00:00+00'::timestamptz
+   where clinic_id = v_seed_clinic
+     and contact_id = (select id from public.contacts where clinic_id = v_seed_clinic and phone_e164 = '+201000000002');
+end $$;
+
+create temp table _t7_reps_before_second_run as
+select jsonb_agg(to_jsonb(r) order by r.contact_id) as reps_rows
+  from l2v.reps r
+ where r.clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376';
+
+-- Second run of 05b_l2v_seed_example.sql (must be a complete no-op)
+\i :repo/database/05b_l2v_seed_example.sql
+
+do $$
+declare
+  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_snap        record;
+  v_reps_snap   jsonb;
+begin
+  select * into v_snap from _t7_snapshot;
+  select reps_rows into v_reps_snap from _t7_reps_before_second_run;
+
+  assert (select count(*)::int from public.contacts where clinic_id = v_seed_clinic) = v_snap.clinic_contacts_cnt,
+    'T7 second run: clinic contacts count unchanged';
+  assert (select count(*)::int from public.contacts) = v_snap.total_contacts_cnt,
+    'T7 second run: total contacts count unchanged';
+  assert (select count(*)::int from l2v.settings where clinic_id = v_seed_clinic) = v_snap.clinic_settings_cnt,
+    'T7 second run: clinic l2v.settings count unchanged';
+  assert (select count(*)::int from l2v.settings) = v_snap.total_settings_cnt,
+    'T7 second run: total l2v.settings count unchanged';
+  assert (select count(*)::int from l2v.reps where clinic_id = v_seed_clinic) = v_snap.clinic_reps_cnt,
+    'T7 second run: clinic l2v.reps count unchanged';
+  assert (select count(*)::int from l2v.reps) = v_snap.total_reps_cnt,
+    'T7 second run: total l2v.reps count unchanged';
+  assert (select settings from public.clinics where id = v_seed_clinic) = v_snap.clinic_settings_json,
+    'T7 second run: clinics.settings JSON identical';
+  assert (select jsonb_agg(to_jsonb(c) order by c.phone_e164)
+            from public.contacts c
+           where c.clinic_id = v_seed_clinic) = v_snap.contacts_rows,
+    'T7 second run: contacts rows and updated_at timestamps identical';
+  assert (select to_jsonb(s)
+            from l2v.settings s
+           where s.clinic_id = v_seed_clinic) = v_snap.l2v_settings_row,
+    'T7 second run: l2v.settings row and created_at identical';
+  assert (select jsonb_agg(to_jsonb(r) order by r.contact_id)
+            from l2v.reps r
+           where r.clinic_id = v_seed_clinic) = v_reps_snap,
+    'T7 second run: l2v.reps rows and last_assigned_at timestamps identical';
+
+  raise notice 'T7 seed example: first run seeded + second run idempotent: OK';
+end $$;
+
