@@ -138,7 +138,7 @@ $$;
 -- Public API (called by n8n through the ClinicOS runtime role)
 -- ---------------------------------------------------------------------
 
--- Is this phone a rep or the manager? Use it to bypass the AI receptionist.
+-- Is this phone an active rep or the manager? Use it to bypass the AI receptionist.
 create function l2v.is_staff(p_clinic_id uuid, p_phone_e164 text)
 returns boolean
 language sql
@@ -152,8 +152,17 @@ as $$
      where c.clinic_id = p_clinic_id
        and c.phone_e164 = p_phone_e164
        and (
-         exists (select 1 from l2v.reps r where r.contact_id = c.id)
-         or exists (select 1 from l2v.settings s where s.manager_contact_id = c.id)
+         exists (
+           select 1 from l2v.reps r
+            where r.clinic_id = p_clinic_id
+              and r.contact_id = c.id
+              and r.is_active
+         )
+         or exists (
+           select 1 from l2v.settings s
+            where s.clinic_id = p_clinic_id
+              and s.manager_contact_id = c.id
+         )
        )
   );
 $$;
@@ -178,8 +187,8 @@ begin
   if not exists (select 1 from public.contacts c where c.id = p_contact_id and c.clinic_id = p_clinic_id) then
     raise exception 'contact % does not belong to clinic %', p_contact_id, p_clinic_id;
   end if;
-  if exists (select 1 from l2v.reps r where r.contact_id = p_contact_id)
-     or exists (select 1 from l2v.settings s where s.manager_contact_id = p_contact_id) then
+  if exists (select 1 from l2v.reps r where r.clinic_id = p_clinic_id and r.contact_id = p_contact_id and r.is_active)
+     or exists (select 1 from l2v.settings s where s.clinic_id = p_clinic_id and s.manager_contact_id = p_contact_id) then
     raise exception 'contact % is staff, not a lead', p_contact_id;
   end if;
 
@@ -189,6 +198,10 @@ begin
   values (p_clinic_id, p_contact_id, p_source, p_campaign, p_treatment, p_referral, coalesce(p_received_at, now()))
   on conflict (contact_id) where status <> 'closed'
   do update set
+    source             = case
+                           when l.source = 'organic' and excluded.source <> 'organic' then excluded.source
+                           else l.source
+                         end,
     campaign           = coalesce(l.campaign, excluded.campaign),
     treatment_interest = coalesce(l.treatment_interest, excluded.treatment_interest),
     referral           = coalesce(l.referral, excluded.referral)
@@ -197,7 +210,9 @@ end;
 $$;
 
 -- Guarded capture for the inbound webhook gate:
---   * returns no row (does not raise) if the contact is staff (rep or manager)
+--   * returns no row (does not raise) if the contact is active staff (rep or manager)
+--   * if a patient with a previously converted lead returns from a NEW ad click (distinct source/referral),
+--     closes the converted lead so a fresh funnel lead is opened
 --   * creates/returns the open lead ONLY if the message has a referral
 --     OR the contact has no confirmed/completed appointment in this clinic
 create function l2v.capture_lead_guarded(
@@ -215,13 +230,14 @@ set search_path = ''
 as $$
 declare
   v_has_referral boolean;
+  v_open_lead    l2v.leads%rowtype;
 begin
   if not exists (select 1 from public.contacts c where c.id = p_contact_id and c.clinic_id = p_clinic_id) then
     raise exception 'contact % does not belong to clinic %', p_contact_id, p_clinic_id;
   end if;
 
-  if exists (select 1 from l2v.reps r where r.contact_id = p_contact_id)
-     or exists (select 1 from l2v.settings s where s.manager_contact_id = p_contact_id) then
+  if exists (select 1 from l2v.reps r where r.clinic_id = p_clinic_id and r.contact_id = p_contact_id and r.is_active)
+     or exists (select 1 from l2v.settings s where s.clinic_id = p_clinic_id and s.manager_contact_id = p_contact_id) then
     return;
   end if;
 
@@ -237,6 +253,29 @@ begin
        and ap.status in ('confirmed', 'completed')
   ) then
     return;
+  end if;
+
+  if v_has_referral then
+    select l.* into v_open_lead
+      from l2v.leads l
+     where l.clinic_id = p_clinic_id
+       and l.contact_id = p_contact_id
+       and l.status <> 'closed'
+     for update;
+
+    if found
+       and coalesce(v_open_lead.referral ->> 'source_id', v_open_lead.referral::text, '')
+           is distinct from coalesce(p_referral ->> 'source_id', p_referral::text, '')
+       and exists (
+         select 1
+           from public.appointments ap
+          where ap.clinic_id = p_clinic_id
+            and ap.contact_id = p_contact_id
+            and ap.created_at >= v_open_lead.created_at
+            and ap.status in ('confirmed', 'completed')
+       ) then
+      update l2v.leads set status = 'closed' where id = v_open_lead.id;
+    end if;
   end if;
 
   return query
@@ -419,7 +458,9 @@ begin
   select r.id into v_rep
     from l2v.reps r
     join public.contacts c on c.id = r.contact_id
-   where r.clinic_id = p_clinic_id and c.phone_e164 = p_phone_e164;
+   where r.clinic_id = p_clinic_id
+     and r.is_active
+     and c.phone_e164 = p_phone_e164;
   if not found then
     return query select false, null::uuid, null::uuid, 'none'::text;
     return;
@@ -452,6 +493,32 @@ begin
 end;
 $$;
 
+-- Explicitly close an open lead (won or archived), freeing the contact's
+-- unique open-lead slot for future campaigns while preserving KPI history.
+create function l2v.close_lead(p_clinic_id uuid, p_lead_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_closed boolean := false;
+begin
+  if p_clinic_id is null or p_lead_id is null then
+    return false;
+  end if;
+
+  update l2v.leads l
+     set status = 'closed'
+   where l.clinic_id = p_clinic_id
+     and l.id = p_lead_id
+     and l.status <> 'closed';
+
+  get diagnostics v_closed = row_count;
+  return coalesce(v_closed, false);
+end;
+$$;
+
 -- Run every minute from n8n. Closes assignments whose patient already booked,
 -- then moves overdue ones to the next rep and alerts the manager.
 -- Returns the number of escalated assignments.
@@ -475,7 +542,8 @@ begin
      and a.status = 'pending'
      and exists (
        select 1 from public.appointments ap
-        where ap.contact_id = l.contact_id
+        where ap.clinic_id = l.clinic_id
+          and ap.contact_id = l.contact_id
           and ap.created_at >= l.created_at
           and ap.status in ('confirmed', 'completed')
      );
@@ -541,7 +609,9 @@ end;
 $$;
 
 -- Daily KPIs for the clinic report (clinic timezone).
---   avg_first_reply_s : first outbound message after the lead's first inbound message
+--   avg_first_reply_s : seconds from first inbound message to first outbound WhatsApp reply
+--                       (measures the bot's instant auto-reply via outbox.sent_at or messages out;
+--                        does not measure reception staff response speed)
 --   booked_leads      : leads whose patient got a confirmed/completed appointment after the lead
 --   no_shows / visits : appointments that started that day and are resolved (completed or no_show)
 create function l2v.kpi_daily(p_clinic_id uuid, p_from date, p_to date)
@@ -563,7 +633,9 @@ as $$
   with tz as (
     select coalesce(nullif(c.timezone, ''), 'UTC') as name from public.clinics c where c.id = p_clinic_id
   ), days as (
-    select d::date as day from generate_series(p_from, p_to, interval '1 day') d
+    select d::date as day
+      from generate_series(p_from, p_to, interval '1 day') d
+     where p_clinic_id is not null and p_from is not null and p_to is not null and p_from <= p_to
   ), lead_stats as (
     select (l.created_at at time zone tz.name)::date as day,
            count(*)::integer as leads,
@@ -571,27 +643,44 @@ as $$
            avg(fr.first_out - l.first_inbound_at) filter (where fr.first_out is not null) as avg_reply,
            count(*) filter (where exists (
              select 1 from public.appointments ap
-              where ap.contact_id = l.contact_id
+              where ap.clinic_id = l.clinic_id
+                and ap.contact_id = l.contact_id
                 and ap.created_at >= l.created_at
                 and ap.status in ('confirmed', 'completed')))::integer as booked_leads
       from l2v.leads l
       cross join tz
       left join lateral (
-        select min(m.created_at) as first_out
-          from public.messages m
-          join public.conversations cv on cv.id = m.conversation_id
-         where cv.contact_id = l.contact_id
-           and m.direction = 'out'
-           and m.created_at >= l.first_inbound_at
+        select nullif(least(
+          coalesce((
+            select min(m.created_at)
+              from public.messages m
+              join public.conversations cv on cv.id = m.conversation_id
+             where cv.clinic_id = l.clinic_id
+               and cv.contact_id = l.contact_id
+               and m.direction = 'out'
+               and m.created_at >= l.first_inbound_at
+          ), 'infinity'::timestamptz),
+          coalesce((
+            select min(coalesce(o.sent_at, o.created_at))
+              from public.outbox o
+             where o.clinic_id = l.clinic_id
+               and o.contact_id = l.contact_id
+               and o.status = 'sent'
+               and coalesce(o.sent_at, o.created_at) >= l.first_inbound_at
+          ), 'infinity'::timestamptz)
+        ), 'infinity'::timestamptz) as first_out
       ) fr on true
      where l.clinic_id = p_clinic_id
+       and (l.created_at at time zone tz.name)::date between p_from and p_to
      group by 1
   ), esc as (
     select (a.escalated_at at time zone tz.name)::date as day, count(*)::integer as escalations
       from l2v.assignments a
       join l2v.leads l on l.id = a.lead_id
       cross join tz
-     where l.clinic_id = p_clinic_id and a.escalated_at is not null
+     where l.clinic_id = p_clinic_id
+       and a.escalated_at is not null
+       and (a.escalated_at at time zone tz.name)::date between p_from and p_to
      group by 1
   ), appt as (
     select (ap.starts_at at time zone tz.name)::date as day,
@@ -600,6 +689,7 @@ as $$
       from public.appointments ap
       cross join tz
      where ap.clinic_id = p_clinic_id
+       and (ap.starts_at at time zone tz.name)::date between p_from and p_to
      group by 1
   )
   select d.day,
@@ -646,6 +736,7 @@ begin
         l2v.set_qualification(uuid, text, text, text),
         l2v.qualify_contact(uuid, uuid, text, text, text),
         l2v.rep_ack(uuid, text),
+        l2v.close_lead(uuid, uuid),
         l2v.escalate_overdue(),
         l2v.kpi_daily(uuid, date, date)
         to %I', v_role);

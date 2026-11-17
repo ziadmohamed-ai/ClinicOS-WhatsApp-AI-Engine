@@ -516,4 +516,151 @@ begin
   raise notice 'T7 customisation preservation after re-seed: OK';
 end $$;
 
+-- 12. L2V audit fixes (active-staff checks, close_lead, source upgrade, ad re-entry,
+--     escalate_overdue clinic scope, and kpi_daily outbox auto-reply latency)
+do $$
+declare
+  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_rep1_cid    uuid;
+  v_rep2_cid    uuid;
+  v_pat_a       uuid;
+  v_pat_b       uuid;
+  v_prov_id     uuid;
+  v_svc_id      uuid;
+  v_lead        uuid;
+  v_lead2       uuid;
+  v_new         boolean;
+  v_q           record;
+  v_ack         record;
+  v_reply_s     integer;
+  v_kpi_cnt     integer;
+begin
+  select id into v_rep1_cid from public.contacts where clinic_id = v_seed_clinic and phone_e164 = '+201000000002';
+  select id into v_rep2_cid from public.contacts where clinic_id = v_seed_clinic and phone_e164 = '+201000000003';
+
+  -- (a) Deactivated rep (+201000000002 was deactivated in T7 above) is no longer treated as staff
+  assert not l2v.is_staff(v_seed_clinic, '+201000000002'),
+    'B: deactivated rep must not be treated as staff by l2v.is_staff';
+  assert l2v.is_staff(v_seed_clinic, '+201000000003'),
+    'B: active rep must remain staff';
+
+  -- Deactivated rep cannot ack even if they had a pending assignment before deactivation
+  insert into public.contacts (clinic_id, phone_e164, name)
+  values (v_seed_clinic, '+201119990001', 'Pat Ack Test')
+  returning id into v_pat_a;
+  select * into v_lead, v_new from l2v.capture_lead_guarded(v_seed_clinic, v_pat_a, 'click_to_whatsapp', 'c_ack', '{"source_id":"ad_ack"}'::jsonb);
+  select * into v_q from l2v.qualify_contact(v_seed_clinic, v_pat_a, 'high', 'now', 'whitening');
+  assert v_q.assignment_id is not null, 'B: active rep2 receives assignment';
+
+  update l2v.reps set is_active = false where clinic_id = v_seed_clinic and contact_id = v_rep2_cid;
+  select * into v_ack from l2v.rep_ack(v_seed_clinic, '+201000000003');
+  assert not v_ack.acked and v_ack.reason = 'none',
+    'B: rep_ack must refuse deactivated rep even with a pending assignment';
+  update l2v.reps set is_active = true where clinic_id = v_seed_clinic and contact_id = v_rep2_cid;
+  select * into v_ack from l2v.rep_ack(v_seed_clinic, '+201000000003');
+  assert v_ack.acked and v_ack.reason = 'ok',
+    'B: reactivated rep can ack the pending assignment';
+
+  -- Deactivated rep messaging as patient can be captured cleanly; close_lead lifecycle & bounds
+  select * into v_lead, v_new from l2v.capture_lead_guarded(v_seed_clinic, v_rep1_cid, 'organic');
+  assert v_lead is not null and v_new, 'B: deactivated rep can be captured as organic lead';
+
+  assert not l2v.close_lead(null, v_lead), 'B: close_lead rejects null clinic_id';
+  assert not l2v.close_lead(v_seed_clinic, null), 'B: close_lead rejects null lead_id';
+  assert not l2v.close_lead(gen_random_uuid(), v_lead), 'B: close_lead enforces clinic isolation';
+  assert l2v.close_lead(v_seed_clinic, v_lead), 'B: close_lead closes open lead';
+  assert (select status from l2v.leads where id = v_lead) = 'closed', 'B: lead status updated to closed';
+  assert not l2v.close_lead(v_seed_clinic, v_lead), 'B: close_lead is idempotent on already-closed lead';
+
+  -- (b) source upgrade ('organic' -> 'click_to_whatsapp') without downgrading reverse
+  insert into public.contacts (clinic_id, phone_e164, name)
+  values (v_seed_clinic, '+201119990002', 'Pat Upgrade')
+  returning id into v_pat_b;
+
+  select * into v_lead, v_new from l2v.capture_lead_guarded(v_seed_clinic, v_pat_b, 'organic');
+  assert v_new and (select source from l2v.leads where id = v_lead) = 'organic', 'B: starts organic';
+
+  select * into v_lead2, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_pat_b, 'click_to_whatsapp', 'camp_up', '{"source_id":"ad_100"}'::jsonb);
+  assert v_lead2 = v_lead and not v_new
+     and (select source from l2v.leads where id = v_lead) = 'click_to_whatsapp'
+     and (select campaign from l2v.leads where id = v_lead) = 'camp_up',
+    'B: ad referral upgrades organic source and campaign';
+
+  select * into v_lead2, v_new from l2v.capture_lead(v_seed_clinic, v_pat_b, 'organic');
+  assert (select source from l2v.leads where id = v_lead) = 'click_to_whatsapp',
+    'B: paid source must not downgrade back to organic';
+
+  -- (c) kpi_daily first reply from public.outbox (status = 'sent'), ignoring failed/pending/pre-inbound outbox rows
+  update l2v.leads
+     set first_inbound_at = now(), created_at = now()
+   where id = v_lead;
+
+  insert into public.outbox (clinic_id, contact_id, kind, payload, status, idempotency_key, sent_at, created_at)
+  values
+    (v_seed_clinic, v_pat_b, 'text', '{"text":"too early"}'::jsonb, 'sent', 'kpi-early-' || v_pat_b::text, now() - interval '30 seconds', now() - interval '30 seconds'),
+    (v_seed_clinic, v_pat_b, 'text', '{"text":"failed"}'::jsonb,    'failed', 'kpi-fail-' || v_pat_b::text, now() + interval '2 seconds', now() + interval '2 seconds'),
+    (v_seed_clinic, v_pat_b, 'text', '{"text":"pending"}'::jsonb,   'pending', 'kpi-pend-' || v_pat_b::text, null, now() + interval '3 seconds'),
+    (v_seed_clinic, v_pat_b, 'text', '{"text":"bot reply"}'::jsonb, 'sent', 'kpi-ok-' || v_pat_b::text, now() + interval '12 seconds', now() + interval '12 seconds');
+
+  select avg_first_reply_s into v_reply_s
+    from l2v.kpi_daily(v_seed_clinic, (now() at time zone 'Africa/Cairo')::date - 1, (now() at time zone 'Africa/Cairo')::date + 1)
+   where leads > 0
+   order by day desc
+   limit 1;
+  assert v_reply_s between 11 and 13,
+    'B: kpi_daily measures outbox sent first reply (~12s), got ' || coalesce(v_reply_s::text, 'null');
+
+  select count(*)::int into v_kpi_cnt from l2v.kpi_daily(v_seed_clinic, null, current_date);
+  assert v_kpi_cnt = 0, 'B: kpi_daily with null date returns 0 rows cleanly';
+  select count(*)::int into v_kpi_cnt from l2v.kpi_daily(v_seed_clinic, current_date + 2, current_date);
+  assert v_kpi_cnt = 0, 'B: kpi_daily with inverted date range returns 0 rows cleanly';
+
+  -- (d) Converted lead + new ad re-entry (idempotent on same source_id, opens fresh lead on new source_id or distinct no-source_id referral)
+  insert into public.providers (clinic_id, name) values (v_seed_clinic, 'Dr B') returning id into v_prov_id;
+  insert into public.services (clinic_id, code, name_ar, name_en) values (v_seed_clinic, 'B_SVC', 'خدمة', 'Service') returning id into v_svc_id;
+  insert into public.appointments (clinic_id, contact_id, provider_id, service_id, starts_at, ends_at, status, created_at)
+  values (v_seed_clinic, v_pat_b, v_prov_id, v_svc_id, now() + interval '2 days', now() + interval '2 days 30 minutes', 'confirmed', now() + interval '1 minute');
+
+  select * into v_lead2, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_pat_b, 'click_to_whatsapp', 'camp_up', '{"source_id":"ad_100"}'::jsonb);
+  assert v_lead2 = v_lead and not v_new and (select status from l2v.leads where id = v_lead) <> 'closed',
+    'B: duplicate same source_id stays on existing open lead';
+
+  select * into v_lead2, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_pat_b, 'click_to_whatsapp', 'camp_up2', '{"source_id":"ad_200"}'::jsonb);
+  assert v_lead2 <> v_lead and v_new and (select status from l2v.leads where id = v_lead) = 'closed',
+    'B: distinct ad source_id after conversion closes old lead and opens new lead';
+
+  -- Non-source_id referral: duplicate keeps same lead, distinct referral closes after booking
+  insert into public.appointments (clinic_id, contact_id, provider_id, service_id, starts_at, ends_at, status, created_at)
+  values (v_seed_clinic, v_pat_b, v_prov_id, v_svc_id, now() + interval '3 days', now() + interval '3 days 30 minutes', 'confirmed', now() + interval '2 minutes');
+  update l2v.leads set referral = '{"headline":"ad_A"}'::jsonb where id = v_lead2;
+
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_pat_b, 'click_to_whatsapp', 'camp_up2', '{"headline":"ad_A"}'::jsonb);
+  assert v_lead = v_lead2 and not v_new, 'B: identical non-source_id referral stays idempotent';
+
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_pat_b, 'click_to_whatsapp', 'camp_up3', '{"headline":"ad_B"}'::jsonb);
+  assert v_lead <> v_lead2 and v_new and (select status from l2v.leads where id = v_lead2) = 'closed',
+    'B: distinct non-source_id referral after conversion opens new lead';
+
+  raise notice 'B L2V FIXES TESTS (inactive staff/rep_ack, close_lead, source upgrade, ad re-entry, kpi_daily outbox): OK';
+end $$;
+
+set role anon;
+do $$ begin
+  begin perform l2v.close_lead(gen_random_uuid(), gen_random_uuid()); raise exception 'anon called close_lead';
+  exception when insufficient_privilege then raise notice 'anon close_lead denied'; end;
+end $$;
+reset role;
+
+set role clinicos_api_owner;
+do $$ begin
+  perform l2v.close_lead(gen_random_uuid(), gen_random_uuid());
+  raise notice 'runtime role close_lead allowed';
+end $$;
+reset role;
+
 
