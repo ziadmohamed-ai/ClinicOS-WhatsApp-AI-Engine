@@ -443,3 +443,77 @@ begin
   raise notice 'T7 seed example: first run seeded + second run idempotent: OK';
 end $$;
 
+-- Customise after seed run and verify re-running 05b_l2v_seed_example.sql
+-- does not overwrite staff configuration or existing whatsapp_templates entries.
+do $$
+declare
+  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_real_mgr    uuid;
+  v_rep1        uuid;
+begin
+  -- (a) change l2v.settings.sla_minutes to 30 and manager_contact_id to a real contact
+  insert into public.contacts (clinic_id, phone_e164, name)
+  values (v_seed_clinic, '+201099999999', 'Real Manager')
+  returning id into v_real_mgr;
+
+  update l2v.settings
+     set sla_minutes        = 30,
+         manager_contact_id = v_real_mgr
+   where clinic_id = v_seed_clinic;
+
+  -- (b) deactivate one rep
+  select id into v_rep1
+    from public.contacts
+   where clinic_id = v_seed_clinic and phone_e164 = '+201000000002';
+
+  update l2v.reps
+     set is_active = false
+   where clinic_id = v_seed_clinic
+     and contact_id = v_rep1;
+
+  -- (c) rename whatsapp_templates.lead_handoff.name to 'lead_handoff_v2' in public.clinics.settings
+  update public.clinics
+     set settings = jsonb_set(settings, '{whatsapp_templates,lead_handoff,name}', '"lead_handoff_v2"'::jsonb)
+   where id = v_seed_clinic;
+end $$;
+
+\i :repo/database/05b_l2v_seed_example.sql
+
+do $$
+declare
+  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_real_mgr    uuid;
+  v_rep1        uuid;
+  v_sla         integer;
+  v_sla_mgr     uuid;
+  v_tpl_name    text;
+begin
+  select id into v_real_mgr
+    from public.contacts
+   where clinic_id = v_seed_clinic and phone_e164 = '+201099999999';
+
+  select id into v_rep1
+    from public.contacts
+   where clinic_id = v_seed_clinic and phone_e164 = '+201000000002';
+
+  select sla_minutes, manager_contact_id into v_sla, v_sla_mgr
+    from l2v.settings
+   where clinic_id = v_seed_clinic;
+
+  assert v_sla = 30,
+    'T7 customisation preserved: expected sla_minutes = 30, got ' || coalesce(v_sla::text, 'null');
+  assert v_sla_mgr = v_real_mgr,
+    'T7 customisation preserved: expected manager_contact_id = ' || v_real_mgr || ', got ' || coalesce(v_sla_mgr::text, 'null');
+  assert (select is_active from l2v.reps where clinic_id = v_seed_clinic and contact_id = v_rep1) = false,
+    'T7 customisation preserved: deactivated rep must remain is_active = false';
+
+  select settings #>> '{whatsapp_templates,lead_handoff,name}' into v_tpl_name
+    from public.clinics
+   where id = v_seed_clinic;
+  assert v_tpl_name = 'lead_handoff_v2',
+    'T7 customisation preserved: expected lead_handoff.name = lead_handoff_v2, got ' || coalesce(v_tpl_name, 'null');
+
+  raise notice 'T7 customisation preservation after re-seed: OK';
+end $$;
+
+
