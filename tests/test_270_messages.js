@@ -2259,6 +2259,16 @@ addTest('L2V Parse AI Output: control — normal booking_request and normal faq 
   assert.strictEqual(faq.parsed.lead_budget_band, 'mid');
 });
 
+addTest('L2V Workflow Validator: clinicos-main-engine.json and clinicos-main-engine.l2v.json pass all structural and add-on contract checks', 'Lead-to-Visit', () => {
+  const path = require('path');
+  const { validateStructure, validateL2vAddonContract } = require('./validate_workflow.js');
+  const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
+  const l2vWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.l2v.json'));
+  validateL2vAddonContract(origWf, l2vWf);
+  assert.strictEqual(origWf.nodes.length, 30);
+  assert.strictEqual(l2vWf.nodes.length, 36);
+});
+
 // ============================================================================
 // EXECUTE ALL 270 TESTS & REPORT SUMMARY
 // ============================================================================

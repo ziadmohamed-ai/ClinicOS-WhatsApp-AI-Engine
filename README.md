@@ -181,6 +181,7 @@ ClinicOS includes a standalone, zero-dependency automated evaluation and Red-Tea
 
 ```bash
 node tests/test_270_messages.js
+node tests/validate_workflow.js
 ```
 
 | Category | Scenarios | Result | What It Verifies |
@@ -256,6 +257,7 @@ Execute the SQL scripts inside **[`database/`](./database/)** in order inside yo
 ### 3. Run the 270-Scenario Verification Suite
 ```bash
 node tests/test_270_messages.js
+node tests/validate_workflow.js
 ```
 
 ### 4. Configure Meta Webhook
