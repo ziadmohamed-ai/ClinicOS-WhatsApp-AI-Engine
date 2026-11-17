@@ -130,6 +130,63 @@ function validateStructure(wfOrPath, customLabel) {
     }
   }
 
+  const saveNode = wf.nodes.find((n) => n.name === 'Save State & Enqueue');
+  if (saveNode) {
+    const q = String(saveNode.parameters?.query ?? '');
+    assert.ok(
+      q.includes("'whatsapp'::text, NULL::text") && !q.includes("'whatsapp'::text, $17::text"),
+      `${rel}: Save State & Enqueue must pass NULL::text (not $17::text) as 7th argument to book_appointment`
+    );
+  }
+  const isVoiceNode = wf.nodes.find((n) => n.name === 'Is Voice Note?');
+  if (isVoiceNode) {
+    const condExpr = String(isVoiceNode.parameters?.conditions?.conditions?.[0]?.leftValue ?? '');
+    assert.ok(
+      condExpr.includes('messages.some(') && !condExpr.includes('messages[0]'),
+      `${rel}: Is Voice Note? must inspect messages.some(...) rather than hardcoding messages[0]`
+    );
+  }
+  const getAudioNode = wf.nodes.find((n) => n.name === 'Get Audio URL');
+  if (getAudioNode) {
+    const urlExpr = String(getAudioNode.parameters?.url ?? '');
+    assert.ok(
+      urlExpr.includes('.find(') && !urlExpr.includes('messages[0]'),
+      `${rel}: Get Audio URL must resolve the actionable voice message via .find(...) rather than hardcoding messages[0]`
+    );
+  }
+  const dlVoiceNode = wf.nodes.find((n) => n.name === 'Download Voice');
+  if (dlVoiceNode) {
+    const urlExpr = String(dlVoiceNode.parameters?.url ?? '');
+    assert.ok(
+      urlExpr.includes('msgs.find(') && !urlExpr.includes('messages[0]'),
+      `${rel}: Download Voice must resolve the actionable voice message via msgs.find(...) rather than hardcoding messages[0]`
+    );
+  }
+  const txVoiceNode = wf.nodes.find((n) => n.name === 'Transcribe Voice');
+  if (txVoiceNode) {
+    const promptExpr = String(
+      (txVoiceNode.parameters?.bodyParameters?.parameters || []).find((p) => p.name === 'prompt')?.value ?? ''
+    );
+    assert.ok(
+      promptExpr.includes('msgs.find(') && !promptExpr.includes('messages?.[0]'),
+      `${rel}: Transcribe Voice prompt must resolve the actionable voice message via msgs.find(...) rather than hardcoding messages?.[0]`
+    );
+  }
+  const saveTxNode = wf.nodes.find((n) => n.name === 'Save & Inject Transcript');
+  if (saveTxNode) {
+    const q = String(saveTxNode.parameters?.query ?? '').trim();
+    const rep = String(saveTxNode.parameters?.options?.queryReplacement ?? '');
+    assert.strictEqual(
+      q,
+      'SELECT public.apply_voice_transcription($1::jsonb, $2::text) AS result;',
+      `${rel}: Save & Inject Transcript must keep the 2-parameter call to public.apply_voice_transcription($1::jsonb, $2::text)`
+    );
+    assert.ok(
+      rep.includes('msgs.findIndex('),
+      `${rel}: Save & Inject Transcript queryReplacement must locate the actionable voice item via msgs.findIndex(...)`
+    );
+  }
+
   return wf;
 }
 
@@ -605,6 +662,102 @@ function runSlaTickMutationTests(origWf, slaWf) {
   return 10;
 }
 
+function runMainWorkflowAuditMutationTests(wf) {
+  const clone = () => JSON.parse(JSON.stringify(wf));
+
+  // Mutation 1: revert Save State & Enqueue NULL::text back to $17::text
+  assert.throws(
+    () => {
+      const m = clone();
+      const saveNode = m.nodes.find((n) => n.name === 'Save State & Enqueue');
+      saveNode.parameters.query = saveNode.parameters.query.replace(
+        "'whatsapp'::text, NULL::text",
+        "'whatsapp'::text, $17::text"
+      );
+      validateStructure(m, 'mutation-save-state');
+    },
+    /Save State & Enqueue must pass NULL::text/,
+    'Mutation 1 (reverted $17::text in Save State & Enqueue) must be rejected'
+  );
+
+  // Mutation 2: revert Is Voice Note? back to hardcoded messages[0]
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Is Voice Note?');
+      n.parameters.conditions.conditions[0].leftValue =
+        '={{ Boolean($json.result?.ok === true && $json.result.messages[0]) }}';
+      validateStructure(m, 'mutation-is-voice-note');
+    },
+    /Is Voice Note\? must inspect messages\.some/,
+    'Mutation 2 (reverted messages[0] in Is Voice Note?) must be rejected'
+  );
+
+  // Mutation 3: revert Get Audio URL back to hardcoded messages[0]
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Get Audio URL');
+      n.parameters.url = '=https://graph.facebook.com/v21.0/{{ $json.result.messages[0].payload.audio?.id }}';
+      validateStructure(m, 'mutation-get-audio-url');
+    },
+    /Get Audio URL must resolve the actionable voice message/,
+    'Mutation 3 (reverted messages[0] in Get Audio URL) must be rejected'
+  );
+
+  // Mutation 4: revert Download Voice back to hardcoded messages[0]
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Download Voice');
+      n.parameters.url = "={{ $('Verify & Save Event').first().json.result.messages[0].payload.audio?.url }}";
+      validateStructure(m, 'mutation-download-voice');
+    },
+    /Download Voice must resolve the actionable voice message/,
+    'Mutation 4 (reverted messages[0] in Download Voice) must be rejected'
+  );
+
+  // Mutation 5: revert Transcribe Voice prompt back to messages?.[0]
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      const p = n.parameters.bodyParameters.parameters.find((x) => x.name === 'prompt');
+      p.value = "={{ (() => { const ev = $('Verify & Save Event').first().json.result?.messages?.[0] ?? {}; return ev; })() }}";
+      validateStructure(m, 'mutation-transcribe-voice');
+    },
+    /Transcribe Voice prompt must resolve the actionable voice message/,
+    'Mutation 5 (reverted messages?.[0] in Transcribe Voice) must be rejected'
+  );
+
+  // Mutation 6: pass incompatible 3rd parameter ($3) in Save & Inject Transcript query
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Save & Inject Transcript');
+      n.parameters.query = 'SELECT public.apply_voice_transcription($1::jsonb, $2::text, $3::uuid) AS result;';
+      validateStructure(m, 'mutation-save-tx-3arg');
+    },
+    /Save & Inject Transcript must keep the 2-parameter call/,
+    'Mutation 6 (3-arg apply_voice_transcription before DB sync) must be rejected'
+  );
+
+  // Mutation 7: revert Save & Inject Transcript queryReplacement to skip msgs.findIndex
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Save & Inject Transcript');
+      n.parameters.options.queryReplacement =
+        "={{ [JSON.stringify($('Verify & Save Event').first().json.result), String($json.text ?? '')] }}";
+      validateStructure(m, 'mutation-save-tx-no-findindex');
+    },
+    /Save & Inject Transcript queryReplacement must locate the actionable voice item via msgs\.findIndex/,
+    'Mutation 7 (reverted queryReplacement in Save & Inject Transcript) must be rejected'
+  );
+
+  return 7;
+}
+
 function main() {
   const args = process.argv.slice(2);
   const defaultTargets = [ORIG_WF_PATH, L2V_WF_PATH, SLA_WF_PATH];
@@ -620,10 +773,12 @@ function main() {
       : defaultTargets;
 
   const origWf = validateStructure(ORIG_WF_PATH);
+  runMainWorkflowAuditMutationTests(origWf);
   for (const t of targets) {
     const wf = validateStructure(t);
     if (path.resolve(t) === path.resolve(L2V_WF_PATH)) {
       validateL2vAddonContract(origWf, wf);
+      runMainWorkflowAuditMutationTests(wf);
     } else if (path.resolve(t) === path.resolve(SLA_WF_PATH)) {
       validateSlaTickContract(origWf, wf);
       runSlaTickMutationTests(origWf, wf);
@@ -641,4 +796,5 @@ module.exports = {
   validateL2vAddonContract,
   validateSlaTickContract,
   runSlaTickMutationTests,
+  runMainWorkflowAuditMutationTests,
 };
