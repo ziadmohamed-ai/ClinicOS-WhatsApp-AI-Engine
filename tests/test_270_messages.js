@@ -2288,6 +2288,51 @@ addTest('L2V Workflow Sync: Parse AI Output node in L2V workflow contains lead_t
   );
 });
 
+addTest('L2V Merge: falls back to .all()[$itemIndex] when .item getter throws, and returns { l2v_is_staff: false } when both .item and .all() throw', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const l2vWf = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.l2v.json'), 'utf8')
+  );
+  const mergeNode = l2vWf.nodes.find((n) => n.name === 'L2V Merge');
+  assert.ok(mergeNode, 'L2V Merge node must exist in clinicos-main-engine.l2v.json');
+  const fnMerge = new Function('$json', '$', '$itemIndex', mergeNode.parameters.jsCode);
+
+  const item0 = { clinic_id: 'c1', contact_id: 'p0', body: 'first item', route: 'ai' };
+  const item1 = { clinic_id: 'c1', contact_id: 'p1', body: 'second item', route: 'ai' };
+
+  // (a) .item getter throws ('Paired item lost') while .all() returns two items -> $itemIndex = 1 returns item1 (not item0)
+  const stubItemThrows = (name) => {
+    assert.strictEqual(name, 'Parse Turn & State');
+    return {
+      get item() {
+        throw new Error('Paired item lost');
+      },
+      all: () => [{ json: item0 }, { json: item1 }],
+    };
+  };
+  const resStaffFalse = fnMerge({ is_staff: false }, stubItemThrows, 1);
+  assert.deepStrictEqual(resStaffFalse.json, { ...item1, l2v_is_staff: false });
+  assert.notStrictEqual(resStaffFalse.json.contact_id, item0.contact_id);
+
+  const resStaffTrue = fnMerge({ is_staff: true }, stubItemThrows, 1);
+  assert.deepStrictEqual(resStaffTrue.json, { ...item1, l2v_is_staff: true });
+
+  // (b) both .item and .all() throw/fail -> returns { l2v_is_staff: false } only
+  const stubBothThrow = (name) => {
+    assert.strictEqual(name, 'Parse Turn & State');
+    return {
+      get item() {
+        throw new Error('Paired item lost');
+      },
+      all: () => {
+        throw new Error('All items unavailable');
+      },
+    };
+  };
+  assert.deepStrictEqual(fnMerge({ is_staff: true }, stubBothThrow, 1).json, { l2v_is_staff: false });
+});
+
 // ============================================================================
 // EXECUTE ALL 270 TESTS & REPORT SUMMARY
 // ============================================================================

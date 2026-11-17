@@ -266,6 +266,30 @@ function validateL2vAddonContract(origWf, l2vWf) {
     if (name === 'Parse Turn & State') return { all: () => [{ json: sampleTurn0 }, { json: sampleTurn1 }] };
     throw new Error('Unexpected lookup: ' + name);
   };
+  const lookupItemThrowsAllWorks = (name) => {
+    if (name === 'Parse Turn & State') {
+      return {
+        get item() {
+          throw new Error('Paired item lost');
+        },
+        all: () => [{ json: sampleTurn0 }, { json: sampleTurn1 }],
+      };
+    }
+    throw new Error('Unexpected lookup: ' + name);
+  };
+  const lookupBothThrow = (name) => {
+    if (name === 'Parse Turn & State') {
+      return {
+        get item() {
+          throw new Error('Paired item lost');
+        },
+        all: () => {
+          throw new Error('Execution data unavailable');
+        },
+      };
+    }
+    throw new Error('Unexpected lookup: ' + name);
+  };
   const lookupBroken = () => {
     throw new Error('Parse Turn unavailable');
   };
@@ -277,9 +301,18 @@ function validateL2vAddonContract(origWf, l2vWf) {
     ...sampleTurn0,
     l2v_is_staff: false,
   });
-  // Verify .all()[$itemIndex] selects item 1 (not item 0) when .item is absent
+  // Verify .all()[$itemIndex] selects item 1 (not item 0) when .item getter throws or is absent
+  assert.deepStrictEqual(fnMerge({ is_staff: false }, lookupItemThrowsAllWorks, 1).json, {
+    ...sampleTurn1,
+    l2v_is_staff: false,
+  });
+  assert.deepStrictEqual(fnMerge({ is_staff: true }, lookupItemThrowsAllWorks, 1).json, {
+    ...sampleTurn1,
+    l2v_is_staff: true,
+  });
   assert.deepStrictEqual(fnMerge({ is_staff: false }, lookupAll, 1).json, { ...sampleTurn1, l2v_is_staff: false });
-  // Verify unavailable Parse Turn returns { l2v_is_staff: false } only
+  // Verify unavailable Parse Turn or both .item and .all() throwing returns { l2v_is_staff: false } only
+  assert.deepStrictEqual(fnMerge({ is_staff: true }, lookupBothThrow, 1).json, { l2v_is_staff: false });
   assert.deepStrictEqual(fnMerge({ is_staff: true }, lookupBroken, 0).json, { l2v_is_staff: false });
   assert.deepStrictEqual(fnMerge({ is_staff: true }, lookupAll, 5).json, { l2v_is_staff: false });
 
