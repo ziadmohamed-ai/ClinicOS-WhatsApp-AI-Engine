@@ -2269,6 +2269,25 @@ addTest('L2V Workflow Validator: clinicos-main-engine.json and clinicos-main-eng
   assert.strictEqual(l2vWf.nodes.length, 36);
 });
 
+addTest('L2V Workflow Sync: Parse AI Output node in L2V workflow contains lead_timing and lead_budget_band from nodes/parse_ai_output.js', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const l2vWf = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.l2v.json'), 'utf8')
+  );
+  const parseAiNode = l2vWf.nodes.find((n) => n.name === 'Parse AI Output');
+  assert.ok(parseAiNode, 'Parse AI Output node must exist in clinicos-main-engine.l2v.json');
+  assert.ok(parseAiNode.parameters.jsCode.includes('lead_timing'), 'Parse AI Output jsCode must contain lead_timing');
+  assert.ok(
+    parseAiNode.parameters.jsCode.includes('lead_budget_band'),
+    'Parse AI Output jsCode must contain lead_budget_band'
+  );
+  assert.strictEqual(
+    parseAiNode.parameters.jsCode.replace(/\r\n/g, '\n'),
+    PARSE_AI_OUTPUT_JS.replace(/\r\n/g, '\n')
+  );
+});
+
 // ============================================================================
 // EXECUTE ALL 270 TESTS & REPORT SUMMARY
 // ============================================================================

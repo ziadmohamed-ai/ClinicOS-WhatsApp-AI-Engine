@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Workflow structural & L2V add-on contract validator (Task T5 / T6).
+// Workflow structural, source-of-truth sync, and L2V add-on contract validator (Task T5 / T6).
 // Usage:
 //   node tests/validate_workflow.js
 //   node tests/validate_workflow.js workflow/clinicos-main-engine.json workflow/clinicos-main-engine.l2v.json
@@ -7,13 +7,13 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { getSourceOfTruthMap } = require('../scripts/sync_node_code.js');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const ORIG_WF_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.json');
 const L2V_WF_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.l2v.json');
 const SLA_WF_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-l2v-sla-tick.json');
 const TASKS_MD_PATH = path.join(REPO_ROOT, 'docs', 'l2v', 'TASKS.md');
-const L2V_PREPARE_PATH = path.join(REPO_ROOT, 'nodes', 'l2v_prepare.js');
 
 const EXPECTED_ADDED_NODES = [
   'L2V Prepare',
@@ -47,6 +47,7 @@ function extractQualifySqlFromTasksMd() {
 function validateStructure(wfPath) {
   const rel = path.relative(REPO_ROOT, wfPath);
   const wf = JSON.parse(fs.readFileSync(wfPath, 'utf8'));
+  const sourceMap = getSourceOfTruthMap();
 
   assert.ok(
     typeof wf.name === 'string' && wf.name.startsWith('ClinicOS'),
@@ -71,6 +72,26 @@ function validateStructure(wfPath) {
         assert.ok(
           credObj && typeof credObj.id === 'string' && /^YOUR_[A-Z0-9_]+_CREDENTIAL_ID$/.test(credObj.id),
           `${rel}: node "${n.name}" credential "${credType}" id must be a YOUR_*_CREDENTIAL_ID placeholder, got ${JSON.stringify(credObj?.id)}`
+        );
+      }
+    }
+
+    // Every code/agent node backed by a source file in nodes/*.js or prompts/*.xml must match it exactly
+    const spec = sourceMap[n.name];
+    if (spec) {
+      if (spec.kind === 'jsCode') {
+        const actual = String(n.parameters?.jsCode ?? '').replace(/\r\n/g, '\n');
+        assert.strictEqual(
+          actual,
+          spec.expected,
+          `${rel}: node "${n.name}" parameters.jsCode is out of sync with ${spec.relPath} (run node scripts/sync_node_code.js)`
+        );
+      } else if (spec.kind === 'systemMessage') {
+        const actual = String(n.parameters?.options?.systemMessage ?? '').replace(/\r\n/g, '\n');
+        assert.strictEqual(
+          actual,
+          spec.expected,
+          `${rel}: node "${n.name}" parameters.options.systemMessage is out of sync with ${spec.relPath} (run node scripts/sync_node_code.js)`
         );
       }
     }
@@ -114,6 +135,7 @@ function validateStructure(wfPath) {
 function validateL2vAddonContract(origWf, l2vWf) {
   const origByName = new Map(origWf.nodes.map((n) => [n.name, n]));
   const l2vByName = new Map(l2vWf.nodes.map((n) => [n.name, n]));
+  const sourceMap = getSourceOfTruthMap();
 
   const removed = [...origByName.keys()].filter((k) => !l2vByName.has(k));
   const added = [...l2vByName.keys()].filter((k) => !origByName.has(k));
@@ -125,9 +147,10 @@ function validateL2vAddonContract(origWf, l2vWf) {
     `L2V workflow must add only ${JSON.stringify(EXPECTED_ADDED_NODES)}, got ${JSON.stringify(added)}`
   );
 
-  // Check that no existing node changed except Reminder & Outbox Timer -> 1 minute
+  // Check that no existing node changed except Reminder & Outbox Timer (1 min) plus synced jsCode/systemMessage fields
   for (const [name, origNode] of origByName.entries()) {
     const l2vNode = l2vByName.get(name);
+    const cloneOrig = JSON.parse(JSON.stringify(origNode));
     if (name === 'Reminder & Outbox Timer') {
       const interval = l2vNode.parameters?.rule?.interval;
       assert.deepStrictEqual(
@@ -135,20 +158,22 @@ function validateL2vAddonContract(origWf, l2vWf) {
         [{ field: 'minutes', minutesInterval: 1 }],
         `Reminder & Outbox Timer interval must be 1 minute, got ${JSON.stringify(interval)}`
       );
-      const cloneOrig = JSON.parse(JSON.stringify(origNode));
       cloneOrig.parameters.rule.interval = [{ field: 'minutes', minutesInterval: 1 }];
-      assert.strictEqual(
-        JSON.stringify(l2vNode),
-        JSON.stringify(cloneOrig),
-        'Reminder & Outbox Timer changed properties other than rule.interval'
-      );
-    } else {
-      assert.strictEqual(
-        JSON.stringify(l2vNode),
-        JSON.stringify(origNode),
-        `Pre-existing node "${name}" was modified`
-      );
     }
+    const spec = sourceMap[name];
+    if (spec) {
+      if (spec.kind === 'jsCode') {
+        cloneOrig.parameters.jsCode = spec.expected;
+      } else if (spec.kind === 'systemMessage') {
+        if (!cloneOrig.parameters.options) cloneOrig.parameters.options = {};
+        cloneOrig.parameters.options.systemMessage = spec.expected;
+      }
+    }
+    assert.strictEqual(
+      JSON.stringify(l2vNode),
+      JSON.stringify(cloneOrig),
+      `Pre-existing node "${name}" changed disallowed properties`
+    );
   }
 
   // Verify pre-existing connections preserved except Parse Turn & State -> Route Turn and Emergency Reply Guard side branch
@@ -215,34 +240,48 @@ function validateL2vAddonContract(origWf, l2vWf) {
     'L2V Qualify must be a dead end with no outgoing connections'
   );
 
-  // Verify L2V Prepare code matches nodes/l2v_prepare.js and mode is runOnceForEachItem
+  // Verify L2V Prepare code mode is runOnceForEachItem
   const prepareNode = l2vByName.get('L2V Prepare');
-  const expectedPrepareJs = fs.readFileSync(L2V_PREPARE_PATH, 'utf8').replace(/\r\n/g, '\n');
   assert.strictEqual(prepareNode.type, 'n8n-nodes-base.code');
   assert.strictEqual(prepareNode.parameters.mode, 'runOnceForEachItem');
-  assert.strictEqual(
-    prepareNode.parameters.jsCode.replace(/\r\n/g, '\n'),
-    expectedPrepareJs,
-    'L2V Prepare jsCode must equal nodes/l2v_prepare.js'
-  );
 
-  // Verify L2V Merge fail-open behavior
+  // Verify L2V Merge fail-open behavior and .all()[$itemIndex] fallback (never .first())
   const mergeNode = l2vByName.get('L2V Merge');
   assert.strictEqual(mergeNode.type, 'n8n-nodes-base.code');
   assert.strictEqual(mergeNode.parameters.mode, 'runOnceForEachItem');
-  const fnMerge = new Function('$json', '$', mergeNode.parameters.jsCode);
-  const sampleTurn = { clinic_id: 'c1', contact_id: 'p1', body: 'hi', route: 'ai' };
-  const lookup = (name) => {
-    if (name === 'Parse Turn & State') return { item: { json: sampleTurn } };
+  assert.ok(!/\.first\s*\(/.test(mergeNode.parameters.jsCode), 'L2V Merge must never use .first() fallback');
+  assert.ok(
+    mergeNode.parameters.jsCode.includes("$('Parse Turn & State').all()"),
+    'L2V Merge must use $("Parse Turn & State").all()[$itemIndex] fallback'
+  );
+
+  const fnMerge = new Function('$json', '$', '$itemIndex', mergeNode.parameters.jsCode);
+  const sampleTurn0 = { clinic_id: 'c1', contact_id: 'p1', body: 'first', route: 'ai' };
+  const sampleTurn1 = { clinic_id: 'c1', contact_id: 'p2', body: 'second', route: 'ai' };
+  const lookupItem = (name) => {
+    if (name === 'Parse Turn & State') return { item: { json: sampleTurn0 } };
     throw new Error('Unexpected lookup: ' + name);
   };
-  assert.deepStrictEqual(fnMerge({ is_staff: true }, lookup).json, { ...sampleTurn, l2v_is_staff: true });
-  assert.deepStrictEqual(fnMerge({ is_staff: false }, lookup).json, { ...sampleTurn, l2v_is_staff: false });
-  assert.deepStrictEqual(fnMerge({}, lookup).json, { ...sampleTurn, l2v_is_staff: false });
-  assert.deepStrictEqual(fnMerge({ error: 'db timeout', is_staff: true }, lookup).json, {
-    ...sampleTurn,
+  const lookupAll = (name) => {
+    if (name === 'Parse Turn & State') return { all: () => [{ json: sampleTurn0 }, { json: sampleTurn1 }] };
+    throw new Error('Unexpected lookup: ' + name);
+  };
+  const lookupBroken = () => {
+    throw new Error('Parse Turn unavailable');
+  };
+
+  assert.deepStrictEqual(fnMerge({ is_staff: true }, lookupItem, 0).json, { ...sampleTurn0, l2v_is_staff: true });
+  assert.deepStrictEqual(fnMerge({ is_staff: false }, lookupItem, 0).json, { ...sampleTurn0, l2v_is_staff: false });
+  assert.deepStrictEqual(fnMerge({}, lookupItem, 0).json, { ...sampleTurn0, l2v_is_staff: false });
+  assert.deepStrictEqual(fnMerge({ error: 'db timeout', is_staff: true }, lookupItem, 0).json, {
+    ...sampleTurn0,
     l2v_is_staff: false,
   });
+  // Verify .all()[$itemIndex] selects item 1 (not item 0) when .item is absent
+  assert.deepStrictEqual(fnMerge({ is_staff: false }, lookupAll, 1).json, { ...sampleTurn1, l2v_is_staff: false });
+  // Verify unavailable Parse Turn returns { l2v_is_staff: false } only
+  assert.deepStrictEqual(fnMerge({ is_staff: true }, lookupBroken, 0).json, { l2v_is_staff: false });
+  assert.deepStrictEqual(fnMerge({ is_staff: true }, lookupAll, 5).json, { l2v_is_staff: false });
 
   // Verify L2V Gate and L2V Qualify Postgres nodes (onError, options, queries vs docs/l2v/TASKS.md)
   const gateNode = l2vByName.get('L2V Gate');
@@ -267,6 +306,14 @@ function validateL2vAddonContract(origWf, l2vWf) {
     qualifyNode.parameters.query.replace(/\r\n/g, '\n').trim(),
     expectedQualifySql,
     'L2V Qualify query text must exactly match docs/l2v/TASKS.md'
+  );
+  assert.ok(
+    qualifyNode.parameters.options?.queryReplacement?.includes('$json.service_name_ar ?? null'),
+    'L2V Qualify queryReplacement must pass $json.service_name_ar ?? null as the 5th parameter'
+  );
+  assert.ok(
+    !qualifyNode.parameters.options?.queryReplacement?.includes('service_code'),
+    'L2V Qualify queryReplacement must not pass service_code'
   );
 }
 

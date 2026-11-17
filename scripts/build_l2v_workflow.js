@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Deterministic builder for workflow/clinicos-main-engine.l2v.json (Task T5).
-// Reads workflow/clinicos-main-engine.json and nodes/l2v_prepare.js, inserts only the 6 L2V add-on nodes,
-// rewires Parse Turn & State -> L2V Prepare..Is Staff? -> Route Turn, adds the L2V Qualify? side branch
-// from Emergency Reply Guard, and changes Reminder & Outbox Timer from 15 minutes to 1 minute.
+// Syncs workflow/clinicos-main-engine.json from nodes/*.js and prompts/receptionist-system-prompt.xml,
+// inserts only the 6 L2V add-on nodes, rewires Parse Turn & State -> L2V Prepare..Is Staff? -> Route Turn,
+// adds the L2V Qualify? side branch from Emergency Reply Guard, and sets Reminder & Outbox Timer to 1 minute.
 
 const fs = require('fs');
 const path = require('path');
+const { syncWorkflowFile, syncWorkflowNodeCode } = require('./sync_node_code.js');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SRC_WORKFLOW_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.json');
@@ -23,19 +24,23 @@ const L2V_GATE_QUERY = [
 ].join('\n');
 
 const L2V_MERGE_JS_CODE = [
-  '// Fail-open merge: preserve the Parse Turn & State item and mark l2v_is_staff = true',
-  '// only when L2V Gate explicitly returned is_staff === true without error.',
-  'let turn = {};',
+  '// Fail-open merge: preserve the matching Parse Turn & State item by itemIndex',
+  '// and mark l2v_is_staff = true only when L2V Gate explicitly returned is_staff === true without error.',
+  'let turn = null;',
   'try {',
-  "  turn = $('Parse Turn & State').item?.json ?? $('Parse Turn & State').first?.()?.json ?? {};",
+  '  const idx = typeof $itemIndex === "number" ? $itemIndex : 0;',
+  "  turn = $('Parse Turn & State').item?.json ?? $('Parse Turn & State').all()?.[idx]?.json ?? null;",
   '} catch {',
-  '  turn = {};',
+  '  turn = null;',
+  '}',
+  'if (!turn || typeof turn !== "object" || Array.isArray(turn)) {',
+  '  return { json: { l2v_is_staff: false } };',
   '}',
   'const gate = typeof $json !== "undefined" && $json && typeof $json === "object" ? $json : {};',
   'const isStaff = !gate.error && gate.is_staff === true;',
   'return {',
   '  json: {',
-  '    ...(turn && typeof turn === "object" ? turn : {}),',
+  '    ...turn,',
   '    l2v_is_staff: isStaff,',
   '  },',
   '};',
@@ -44,6 +49,9 @@ const L2V_MERGE_JS_CODE = [
 const L2V_QUALIFY_QUERY = 'SELECT * FROM l2v.qualify_contact($1::uuid, $2::uuid, $3, $4, $5);';
 
 function buildL2vWorkflow() {
+  // Ensure the base workflow is synced with nodes/*.js and prompts/receptionist-system-prompt.xml first
+  syncWorkflowFile(SRC_WORKFLOW_PATH);
+
   const rawWf = fs.readFileSync(SRC_WORKFLOW_PATH, 'utf8');
   const wf = JSON.parse(rawWf);
   const prepareJs = fs.readFileSync(L2V_PREPARE_NODE_PATH, 'utf8').replace(/\r\n/g, '\n');
@@ -175,7 +183,7 @@ function buildL2vWorkflow() {
         options: {
           queryBatching: 'single',
           queryReplacement:
-            '={{ [$json.clinic_id, $json.contact_id, $json.lead_budget_band ?? null, $json.lead_timing ?? null, $json.service_code ?? null] }}',
+            '={{ [$json.clinic_id, $json.contact_id, $json.lead_budget_band ?? null, $json.lead_timing ?? null, $json.service_name_ar ?? null] }}',
         },
         query: L2V_QUALIFY_QUERY,
       },
@@ -193,6 +201,7 @@ function buildL2vWorkflow() {
   ];
 
   wf.nodes.push(...newNodes);
+  syncWorkflowNodeCode(wf);
   if (typeof wf.nodeCount === 'number') {
     wf.nodeCount = wf.nodes.length;
   }
