@@ -29,6 +29,13 @@ Any new JS logic goes in `nodes/*.js` (plain JavaScript, no template-literal esc
 - **Phone format:** ClinicOS stores `+` + digits in `contacts.phone_e164`. Staff numbers must use the same format.
 - **Defaults are for Egypt:** timezone `Africa/Cairo`, UTC offset `+02:00`, language `ar`. Never hard-code a city, address, clinic name or ambulance number.
 
+## Skills in this repo (`.agents/skills/`)
+`self-review` (before the PR), `verify` (the three commands + generated-file check), `open-task-pr` (branch/PR format). Use them in that order.
+
+## Parallel work (`/swarm`, subagents)
+Tasks T1..T5 are a chain and must stay sequential. Parallel work is allowed only for tasks that touch **different files**, each worker on its own branch (`branch` workspace mode / separate worktree), one PR per task.
+Shared files (`tests/test_270_messages.js`, `README.md`, `docs/l2v/TASKS.md`, `AGENTS.md`) are edited by **one** worker per round; the others put tests in a new file and mention it in the PR. A verifier worker runs the `self-review` and `verify` skills on every branch before any PR is opened. Parallel PRs are still reviewed one by one.
+
 ## Pull request format
 ```
 What changed (files, one line each)
