@@ -1,0 +1,162 @@
+{
+  "id": "YOUR_WORKFLOW_ID",
+  "name": "ClinicOS L2V SLA Tick",
+  "active": true,
+  "isArchived": false,
+  "versionId": "YOUR_WORKFLOW_VERSION_ID",
+  "activeVersionId": "YOUR_WORKFLOW_VERSION_ID",
+  "triggerCount": 2,
+  "nodeCount": 4,
+  "createdAt": "2026-11-06T08:25:16.049Z",
+  "updatedAt": "2026-11-11T13:13:28.512Z",
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "binaryMode": "separate"
+  },
+  "tags": [],
+  "parentFolderId": null,
+  "description": "ClinicOS Lead-to-Visit SLA tick: runs l2v.escalate_overdue() every minute and logs workflow errors.",
+  "scopes": [
+    "execution:delete",
+    "execution:list",
+    "execution:read",
+    "execution:reveal",
+    "workflow:create",
+    "workflow:delete",
+    "workflow:disableRedaction",
+    "workflow:enableRedaction",
+    "workflow:execute",
+    "workflow:execute-chat",
+    "workflow:export",
+    "workflow:import",
+    "workflow:list",
+    "workflow:move",
+    "workflow:publish",
+    "workflow:read",
+    "workflow:share",
+    "workflow:unpublish",
+    "workflow:unshare",
+    "workflow:update"
+  ],
+  "canExecute": true,
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Escalate Overdue Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Log Workflow Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "b1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        240,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l2v.escalate_overdue() AS escalated;",
+        "options": {
+          "queryBatching": "single"
+        }
+      },
+      "id": "b1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Escalate Overdue Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        480,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "ClinicOS Runtime PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "4e678cd1-24da-4f24-882b-31f1aaef941b",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {
+          "queryBatching": "single",
+          "queryReplacement": "={{ [$json.workflow?.name || 'ClinicOS - Main Engine', String($json.execution?.id || ''), $json.execution?.lastNodeExecuted || $json.trigger?.error?.node?.name || 'unknown', $json.execution?.error?.name || $json.trigger?.error?.name || 'Error'] }}"
+        },
+        "query": "SELECT public.log_workflow_error($1::text, $2::text, $3::text, $4::text) AS result;"
+      },
+      "id": "74ebd490-d6d6-44db-9b98-346b821915a4",
+      "name": "Log Workflow Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        48,
+        -192
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "ClinicOS Runtime PostgreSQL"
+        }
+      }
+    }
+  ],
+  "nodeGroups": [],
+  "activeVersion": {
+    "sameAsDraft": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "templateCredsSetupCompleted": true
+  }
+}

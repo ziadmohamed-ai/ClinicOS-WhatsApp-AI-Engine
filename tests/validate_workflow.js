@@ -44,9 +44,10 @@ function extractQualifySqlFromTasksMd() {
   return m[1].trim();
 }
 
-function validateStructure(wfPath) {
-  const rel = path.relative(REPO_ROOT, wfPath);
-  const wf = JSON.parse(fs.readFileSync(wfPath, 'utf8'));
+function validateStructure(wfOrPath, customLabel) {
+  const isPath = typeof wfOrPath === 'string';
+  const rel = customLabel || (isPath ? path.relative(REPO_ROOT, wfOrPath) : '<in-memory-workflow>');
+  const wf = isPath ? JSON.parse(fs.readFileSync(wfOrPath, 'utf8')) : wfOrPath;
   const sourceMap = getSourceOfTruthMap();
 
   assert.ok(
@@ -350,18 +351,207 @@ function validateL2vAddonContract(origWf, l2vWf) {
   );
 }
 
+function validateSlaTickContract(origWf, slaWf) {
+  validateStructure(slaWf, 'workflow/clinicos-l2v-sla-tick.json');
+
+  assert.strictEqual(
+    slaWf.name,
+    'ClinicOS L2V SLA Tick',
+    `SLA tick workflow name must be "ClinicOS L2V SLA Tick", got ${JSON.stringify(slaWf.name)}`
+  );
+  assert.strictEqual(
+    slaWf.nodes.length,
+    4,
+    `SLA tick workflow must have exactly 4 nodes, got ${slaWf.nodes.length}`
+  );
+
+  const scheduleNodes = slaWf.nodes.filter((n) => n.type === 'n8n-nodes-base.scheduleTrigger');
+  assert.strictEqual(scheduleNodes.length, 1, 'SLA tick workflow must have exactly 1 Schedule Trigger node');
+  const scheduleNode = scheduleNodes[0];
+  assert.strictEqual(scheduleNode.typeVersion, 1.4, 'Schedule Trigger typeVersion must be 1.4');
+  assert.deepStrictEqual(
+    scheduleNode.parameters?.rule?.interval,
+    [{ field: 'minutes', minutesInterval: 1 }],
+    `Schedule Trigger interval must be 1 minute, got ${JSON.stringify(scheduleNode.parameters?.rule?.interval)}`
+  );
+
+  const schedConn = slaWf.connections[scheduleNode.name];
+  assert.ok(
+    schedConn &&
+      Array.isArray(schedConn.main) &&
+      schedConn.main.length === 1 &&
+      Array.isArray(schedConn.main[0]) &&
+      schedConn.main[0].length === 1,
+    'Schedule Trigger must have a single outgoing main connection'
+  );
+  const escalateNodeName = schedConn.main[0][0].node;
+  const escalateNode = slaWf.nodes.find((n) => n.name === escalateNodeName);
+  assert.ok(escalateNode, `Escalate target node "${escalateNodeName}" not found`);
+  assert.strictEqual(escalateNode.type, 'n8n-nodes-base.postgres', 'Escalate node must be a Postgres node');
+  assert.strictEqual(escalateNode.typeVersion, 2.8, 'Escalate Postgres node typeVersion must be 2.8');
+  assert.strictEqual(escalateNode.parameters?.operation, 'executeQuery', 'Escalate Postgres node must use executeQuery');
+  assert.strictEqual(
+    String(escalateNode.parameters?.query ?? '').replace(/\r\n/g, '\n').trim(),
+    'SELECT l2v.escalate_overdue() AS escalated;',
+    `Escalate Postgres node query must be "SELECT l2v.escalate_overdue() AS escalated;", got ${JSON.stringify(escalateNode.parameters?.query)}`
+  );
+  assert.strictEqual(
+    escalateNode.parameters?.options?.queryBatching,
+    'single',
+    'Escalate Postgres node must set options.queryBatching = "single"'
+  );
+  assert.strictEqual(escalateNode.retryOnFail, true, 'Escalate Postgres node must set retryOnFail: true');
+  assert.strictEqual(escalateNode.maxTries, 3, 'Escalate Postgres node must set maxTries: 3');
+  assert.strictEqual(escalateNode.waitBetweenTries, 1000, 'Escalate Postgres node must set waitBetweenTries: 1000');
+  assert.strictEqual(
+    escalateNode.credentials?.postgres?.id,
+    'YOUR_POSTGRES_CREDENTIAL_ID',
+    'Escalate Postgres node must use placeholder credential YOUR_POSTGRES_CREDENTIAL_ID'
+  );
+
+  const escalateOut = slaWf.connections[escalateNode.name];
+  assert.ok(
+    !escalateOut || Object.values(escalateOut).every((b) => b.flat().length === 0),
+    'Escalate Postgres node must have no outgoing connections'
+  );
+
+  // Verify Error Trigger -> Log Workflow Error matches main workflow
+  const origErrorTrigger = origWf.nodes.find((n) => n.name === 'Error Trigger');
+  const origLogError = origWf.nodes.find((n) => n.name === 'Log Workflow Error');
+  const slaErrorTrigger = slaWf.nodes.find((n) => n.name === 'Error Trigger');
+  const slaLogError = slaWf.nodes.find((n) => n.name === 'Log Workflow Error');
+
+  assert.ok(slaErrorTrigger, 'SLA tick workflow must include "Error Trigger"');
+  assert.ok(slaLogError, 'SLA tick workflow must include "Log Workflow Error"');
+  assert.strictEqual(
+    JSON.stringify(slaErrorTrigger),
+    JSON.stringify(origErrorTrigger),
+    '"Error Trigger" in SLA tick workflow must match "Error Trigger" in clinicos-main-engine.json'
+  );
+  assert.strictEqual(
+    JSON.stringify(slaLogError),
+    JSON.stringify(origLogError),
+    '"Log Workflow Error" in SLA tick workflow must match "Log Workflow Error" in clinicos-main-engine.json'
+  );
+  assert.deepStrictEqual(
+    slaWf.connections['Error Trigger'],
+    { main: [[{ node: 'Log Workflow Error', type: 'main', index: 0 }]] },
+    'Error Trigger must connect to Log Workflow Error'
+  );
+  const logErrorOut = slaWf.connections['Log Workflow Error'];
+  assert.ok(
+    !logErrorOut || Object.values(logErrorOut).every((b) => b.flat().length === 0),
+    'Log Workflow Error must have no outgoing connections'
+  );
+}
+
+function runSlaTickMutationTests(origWf, slaWf) {
+  const clone = () => JSON.parse(JSON.stringify(slaWf));
+
+  // Mutation 1: workflow name not starting with ClinicOS
+  assert.throws(
+    () => {
+      const m = clone();
+      m.name = 'L2V SLA Tick';
+      validateSlaTickContract(origWf, m);
+    },
+    /workflow name must start with "ClinicOS"/,
+    'Mutation 1 (name not starting with ClinicOS) must be rejected'
+  );
+
+  // Mutation 2: workflow name starts with ClinicOS but is not "ClinicOS L2V SLA Tick"
+  assert.throws(
+    () => {
+      const m = clone();
+      m.name = 'ClinicOS Wrong SLA Workflow';
+      validateSlaTickContract(origWf, m);
+    },
+    /SLA tick workflow name must be "ClinicOS L2V SLA Tick"/,
+    'Mutation 2 (wrong ClinicOS workflow name) must be rejected'
+  );
+
+  // Mutation 3: schedule interval != 1 minute
+  assert.throws(
+    () => {
+      const m = clone();
+      const sched = m.nodes.find((n) => n.type === 'n8n-nodes-base.scheduleTrigger');
+      sched.parameters.rule.interval = [{ field: 'minutes', minutesInterval: 15 }];
+      validateSlaTickContract(origWf, m);
+    },
+    /Schedule Trigger interval must be 1 minute/,
+    'Mutation 3 (schedule interval != 1 minute) must be rejected'
+  );
+
+  // Mutation 4: wrong SQL query on the escalate Postgres node
+  assert.throws(
+    () => {
+      const m = clone();
+      const esc = m.nodes.find((n) => n.name === 'Escalate Overdue Leads');
+      esc.parameters.query = 'SELECT l2v.escalate_overdue();';
+      validateSlaTickContract(origWf, m);
+    },
+    /Escalate Postgres node query must be "SELECT l2v\.escalate_overdue\(\) AS escalated;"/,
+    'Mutation 4 (wrong SQL query on escalate Postgres node) must be rejected'
+  );
+
+  // Mutation 5: non-placeholder credential id
+  assert.throws(
+    () => {
+      const m = clone();
+      const esc = m.nodes.find((n) => n.name === 'Escalate Overdue Leads');
+      esc.credentials.postgres.id = 'real-secret-cred-123';
+      validateSlaTickContract(origWf, m);
+    },
+    /YOUR_\*_CREDENTIAL_ID placeholder/,
+    'Mutation 5 (non-placeholder credential id) must be rejected'
+  );
+
+  // Mutation 6: missing Error Trigger -> Log Workflow Error connection (causes orphan / unconnected node)
+  assert.throws(
+    () => {
+      const m = clone();
+      delete m.connections['Error Trigger'];
+      validateSlaTickContract(origWf, m);
+    },
+    /orphan node|no incoming connection|Error Trigger must connect to Log Workflow Error/,
+    'Mutation 6 (missing Error Trigger -> Log Workflow Error connection) must be rejected'
+  );
+
+  // Mutation 7: modified Log Workflow Error query vs main workflow
+  assert.throws(
+    () => {
+      const m = clone();
+      const logNode = m.nodes.find((n) => n.name === 'Log Workflow Error');
+      logNode.parameters.query = 'SELECT 1;';
+      validateSlaTickContract(origWf, m);
+    },
+    /"Log Workflow Error" in SLA tick workflow must match "Log Workflow Error" in clinicos-main-engine\.json/,
+    'Mutation 7 (mismatched Log Workflow Error node) must be rejected'
+  );
+}
+
 function main() {
   const args = process.argv.slice(2);
+  const defaultTargets = [ORIG_WF_PATH, L2V_WF_PATH, SLA_WF_PATH];
   const targets =
     args.length > 0
-      ? args.map((p) => path.resolve(process.cwd(), p))
-      : [ORIG_WF_PATH, L2V_WF_PATH, ...(fs.existsSync(SLA_WF_PATH) ? [SLA_WF_PATH] : [])];
+      ? [
+          ...args.map((p) => path.resolve(process.cwd(), p)),
+          ...(fs.existsSync(SLA_WF_PATH) &&
+          !args.some((p) => path.resolve(process.cwd(), p) === path.resolve(SLA_WF_PATH))
+            ? [SLA_WF_PATH]
+            : []),
+        ]
+      : defaultTargets;
 
+  const origWf = validateStructure(ORIG_WF_PATH);
   for (const t of targets) {
     const wf = validateStructure(t);
     if (path.resolve(t) === path.resolve(L2V_WF_PATH)) {
-      const origWf = validateStructure(ORIG_WF_PATH);
       validateL2vAddonContract(origWf, wf);
+    } else if (path.resolve(t) === path.resolve(SLA_WF_PATH)) {
+      validateSlaTickContract(origWf, wf);
+      runSlaTickMutationTests(origWf, wf);
     }
     console.log(`Workflow valid: ${path.relative(REPO_ROOT, t)} (${wf.nodes.length} nodes)`);
   }
@@ -371,4 +561,9 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { validateStructure, validateL2vAddonContract };
+module.exports = {
+  validateStructure,
+  validateL2vAddonContract,
+  validateSlaTickContract,
+  runSlaTickMutationTests,
+};

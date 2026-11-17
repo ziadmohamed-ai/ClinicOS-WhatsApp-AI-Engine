@@ -2333,6 +2333,24 @@ addTest('L2V Merge: falls back to .all()[$itemIndex] when .item getter throws, a
   assert.deepStrictEqual(fnMerge({ is_staff: true }, stubBothThrow, 1).json, { l2v_is_staff: false });
 });
 
+addTest('L2V SLA Tick Workflow: clinicos-l2v-sla-tick.json passes structural and SLA tick contract checks', 'Lead-to-Visit', () => {
+  const path = require('path');
+  const { validateStructure, validateSlaTickContract } = require('./validate_workflow.js');
+  const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
+  const slaWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-l2v-sla-tick.json'));
+  validateSlaTickContract(origWf, slaWf);
+  assert.strictEqual(slaWf.name, 'ClinicOS L2V SLA Tick');
+  assert.strictEqual(slaWf.nodes.length, 4);
+});
+
+addTest('L2V SLA Tick Workflow Validator Mutations: rejects 7 distinct invalid mutations in memory', 'Lead-to-Visit', () => {
+  const path = require('path');
+  const { validateStructure, runSlaTickMutationTests } = require('./validate_workflow.js');
+  const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
+  const slaWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-l2v-sla-tick.json'));
+  runSlaTickMutationTests(origWf, slaWf);
+});
+
 // ============================================================================
 // EXECUTE ALL 270 TESTS & REPORT SUMMARY
 // ============================================================================
