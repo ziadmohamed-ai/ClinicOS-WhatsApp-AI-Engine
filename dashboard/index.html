@@ -3,9 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ClinicOS — لوحة تحكم العيادة ومحاكي واتساب التفاعلي</title>
-  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <title>ClinicOS — لوحة تحكم العيادة ومحاكي واتساب التفاعلي (Static Mock)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
+    :root {
+      --background: #f8fafc;
+      --foreground: #0f172a;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --muted-foreground: #64748b;
+      --secondary: #f1f5f9;
+      --secondary-foreground: #1e293b;
+    }
     @keyframes pulseGlow {
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.65; transform: scale(0.98); }
@@ -24,6 +33,17 @@
 </head>
 <body class="bg-[var(--background)] text-[var(--foreground)] antialiased p-4 select-none">
 
+  <!-- DEMO DATA Banner (Visible whenever Dashboard API is unconfigured or unreachable) -->
+  <div id="demoDataBanner" role="status" class="bg-amber-500/15 border-2 border-amber-500/60 text-amber-800 rounded-xl px-4 py-2.5 mb-3 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold">
+    <div>
+      <span>⚠️ DEMO DATA — </span>
+      <span id="demoDataReason">البيانات المعروضة حالياً تجريبية (Static Mock). لعرض أرقام العيادة الحقيقية اضبط رابط وتوكن ClinicOS Dashboard API في الكائن DASHBOARD_CONFIG أعلى الصفحة.</span>
+    </div>
+    <button onclick="loadLiveDashboard()" class="px-2.5 py-1 rounded-lg bg-[var(--card)] border border-amber-500/40 text-amber-700 hover:bg-amber-500/10 transition cursor-pointer">
+      🔄 إعادة المحاولة
+    </button>
+  </div>
+
   <!-- Top Demo Director Bar -->
   <div class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-3.5 mb-4 shadow-sm flex flex-wrap items-center justify-between gap-3">
     <div class="flex items-center gap-3">
@@ -33,9 +53,9 @@
       <div>
         <div class="flex items-center gap-2">
           <h1 class="font-bold text-base text-[var(--foreground)]">نظام ClinicOS الذكي — عيادة ديمو التخصصية</h1>
-          <span class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/15 text-emerald-600 font-medium border border-emerald-500/30">وضع المحاكاة التفاعلي (Demo Simulator)</span>
+          <span id="modeStatusBadge" class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/15 text-emerald-600 font-medium border border-emerald-500/30">نموذج عرض ثابت (Static Mock — Demo Simulator)</span>
         </div>
-        <p class="text-xs text-[var(--muted-foreground)]">شاشة العرض التفاعلية لتصوير الفيديو (الداشبورد + محاكي واتساب العميل وموظف الاستقبال)</p>
+        <p class="text-xs text-[var(--muted-foreground)]">نموذج محاكاة ثابت ببيانات تجريبية محلية (Static Mock — غير متصل ببيانات حية حالياً) لعرض الداشبورد ومحاكي واتساب العميل وموظف الاستقبال</p>
       </div>
     </div>
 
@@ -79,7 +99,7 @@
             <span>🤖</span>
           </div>
           <div id="kpiBotStatus" class="text-base font-bold text-emerald-600 mt-1">نشط (يرد تلقائياً)</div>
-          <div id="kpiBotSub" class="text-xs text-[var(--muted-foreground)] mt-1">GPT-4.1 Mini + SQL</div>
+          <div id="kpiBotSub" class="text-xs text-[var(--muted-foreground)] mt-1">GPT-4.1 + SQL</div>
         </div>
 
         <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3.5 shadow-sm">
@@ -168,12 +188,48 @@
         </div>
       </div>
 
-      <!-- Live Engine Pipeline Monitor (Shows n8n + Supabase Node Execution) -->
+      <!-- Lead-to-Visit KPI & Masked Leads Card (Populated from ClinicOS Dashboard API when configured) -->
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h2 class="font-bold text-sm text-[var(--foreground)]">📊 مؤشرات Lead-to-Visit وآخر 50 عميل محتمل (أرقام الهواتف مقنّعة)</h2>
+            <p id="l2vRangeLabel" class="text-xs text-[var(--muted-foreground)]">DEMO DATA — بيانات تجريبية غير متصلة بـ API</p>
+          </div>
+          <div class="flex items-center gap-3 text-xs">
+            <span>إجمالي العملاء: <strong id="kpiL2vLeads" class="text-emerald-600">0</strong></span>
+            <span>جادّون (Hot): <strong id="kpiL2vHot" class="text-amber-600">0</strong></span>
+            <span>حجزوا: <strong id="kpiL2vBooked" class="text-sky-600">0</strong></span>
+            <span>تصعيد SLA: <strong id="kpiL2vEscalations" class="text-red-500">0</strong></span>
+          </div>
+        </div>
+        <div class="overflow-x-auto max-h-52 overflow-y-auto">
+          <table class="w-full text-right border-collapse">
+            <thead>
+              <tr class="border-b border-[var(--border)] text-xs text-[var(--muted-foreground)]">
+                <th class="py-2 px-3 font-semibold">الهاتف (مقنّع)</th>
+                <th class="py-2 px-3 font-semibold">الحالة</th>
+                <th class="py-2 px-3 font-semibold">المصدر</th>
+                <th class="py-2 px-3 font-semibold">التقييم</th>
+                <th class="py-2 px-3 font-semibold">الخدمة المهتم بها</th>
+              </tr>
+            </thead>
+            <tbody id="l2vLeadsBody" class="text-xs divide-y divide-[var(--border)]">
+              <tr>
+                <td colspan="5" class="py-4 text-center text-[var(--muted-foreground)]">
+                  DEMO DATA — اضبط DASHBOARD_CONFIG لجلب آخر 50 عميل محتمل من ClinicOS Dashboard API
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Simulated Pipeline Monitor -->
       <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm">
         <div class="flex items-center justify-between mb-2.5">
           <div class="flex items-center gap-2">
             <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
-            <h2 class="font-bold text-sm text-[var(--foreground)]">⚙️ مسار التنفيذ اللحظي (ClinicOS - Main Engine — 23 Nodes)</h2>
+            <h2 class="font-bold text-sm text-[var(--foreground)]">⚙️ مسار التنفيذ اللحظي (ClinicOS - Main Engine — 30 core / 36 L2V nodes)</h2>
           </div>
           <span id="lastExecBadge" class="text-xs text-[var(--muted-foreground)]">جاهز للاستقبال</span>
         </div>
@@ -208,7 +264,7 @@
 
         <!-- Activity Log Feed -->
         <div id="engineLog" class="bg-[var(--background)] border border-[var(--border)] rounded-lg p-2.5 h-32 overflow-y-auto space-y-1.5 text-xs font-mono">
-          <div class="text-[var(--muted-foreground)]">[System] ClinicOS - Main Engine (YOUR_WORKFLOW_ID) جاهز ومربوط بـ Supabase...</div>
+          <div class="text-[var(--muted-foreground)]">[Demo Simulator] محاكي المسار التفاعلي المحلي جاهز للتجربة (غير متصل بتنفيذ حي)...</div>
         </div>
       </div>
     </div>
@@ -317,6 +373,20 @@
   </div>
 
   <script>
+    // Dashboard API configuration (placeholders only — never commit a real token here).
+    // Override at runtime via window.CLINICOS_DASHBOARD_CONFIG before this script runs if desired.
+    const DASHBOARD_CONFIG = Object.assign(
+      {
+        apiUrl: 'YOUR_DASHBOARD_API_URL',
+        apiToken: 'YOUR_DASHBOARD_HEADER_TOKEN',
+        headerName: 'x-dashboard-token',
+        rangeDays: 30
+      },
+      typeof globalThis !== 'undefined' && globalThis.CLINICOS_DASHBOARD_CONFIG
+        ? globalThis.CLINICOS_DASHBOARD_CONFIG
+        : {}
+    );
+
     const state = {
       currentTab: 'patient',
       conversationStatus: 'bot',
@@ -394,6 +464,113 @@
       box.scrollTop = box.scrollHeight;
     }
 
+    function escapeHtml(val) {
+      return String(val ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function isDashboardApiConfigured(cfg) {
+      if (!cfg || typeof cfg !== 'object') return false;
+      const url = String(cfg.apiUrl ?? '').trim();
+      const token = String(cfg.apiToken ?? '').trim();
+      if (!url || !token) return false;
+      if (url.startsWith('YOUR_') || token.startsWith('YOUR_')) return false;
+      return /^https?:\/\//i.test(url);
+    }
+
+    function formatIsoDateUtc(dateObj) {
+      return dateObj.toISOString().slice(0, 10);
+    }
+
+    function showDemoBanner(reasonText) {
+      const banner = document.getElementById('demoDataBanner');
+      const reason = document.getElementById('demoDataReason');
+      const badge = document.getElementById('modeStatusBadge');
+      if (banner) banner.classList.remove('hidden');
+      if (reason && reasonText) reason.textContent = reasonText;
+      if (badge) badge.textContent = 'DEMO DATA (Static Mock)';
+    }
+
+    function hideDemoBanner() {
+      const banner = document.getElementById('demoDataBanner');
+      const badge = document.getElementById('modeStatusBadge');
+      if (banner) banner.classList.add('hidden');
+      if (badge) badge.textContent = 'متصل بـ ClinicOS Dashboard API ✓';
+    }
+
+    async function loadLiveDashboard() {
+      if (!isDashboardApiConfigured(DASHBOARD_CONFIG) || typeof fetch !== 'function') {
+        showDemoBanner('DEMO DATA — لم يتم ضبط رابط أو توكن ClinicOS Dashboard API؛ الأرقام المعروضة تجريبية.');
+        return false;
+      }
+
+      const days = Math.min(Math.max(Number(DASHBOARD_CONFIG.rangeDays) || 30, 1), 90);
+      const toDate = new Date();
+      const fromDate = new Date(toDate.getTime() - (days - 1) * 86400000);
+      const fromIso = formatIsoDateUtc(fromDate);
+      const toIso = formatIsoDateUtc(toDate);
+      const sep = DASHBOARD_CONFIG.apiUrl.includes('?') ? '&' : '?';
+      const reqUrl = `${DASHBOARD_CONFIG.apiUrl}${sep}from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`;
+      const hdrName = String(DASHBOARD_CONFIG.headerName || 'x-dashboard-token').trim();
+
+      try {
+        const res = await fetch(reqUrl, {
+          method: 'GET',
+          headers: { [hdrName]: String(DASHBOARD_CONFIG.apiToken).trim() }
+        });
+        if (!res || !res.ok) {
+          throw new Error(`HTTP ${res ? res.status : 'error'}`);
+        }
+        const data = await res.json();
+        if (!data || data.ok !== true || !Array.isArray(data.kpi_daily) || !Array.isArray(data.leads)) {
+          throw new Error('Invalid API payload');
+        }
+
+        let totalLeads = 0;
+        let totalHot = 0;
+        let totalBooked = 0;
+        let totalEsc = 0;
+        for (const row of data.kpi_daily) {
+          totalLeads += Number(row.leads || 0);
+          totalHot += Number(row.hot_leads || 0);
+          totalBooked += Number(row.booked_leads || 0);
+          totalEsc += Number(row.escalations || 0);
+        }
+
+        document.getElementById('kpiBookings').textContent = String(totalBooked);
+        document.getElementById('kpiL2vLeads').textContent = String(totalLeads);
+        document.getElementById('kpiL2vHot').textContent = String(totalHot);
+        document.getElementById('kpiL2vBooked').textContent = String(totalBooked);
+        document.getElementById('kpiL2vEscalations').textContent = String(totalEsc);
+        document.getElementById('l2vRangeLabel').textContent = `الفترة: ${String(data.from || fromIso)} → ${String(data.to || toIso)} (${data.leads.length} عميل)`;
+
+        const leadsBody = document.getElementById('l2vLeadsBody');
+        if (data.leads.length === 0) {
+          leadsBody.innerHTML = '<tr><td colspan="5" class="py-4 text-center text-[var(--muted-foreground)]">لا توجد بيانات عملاء محتملين في هذه الفترة</td></tr>';
+        } else {
+          leadsBody.innerHTML = data.leads.slice(0, 50).map(lead => `
+            <tr>
+              <td class="py-2 px-3 font-mono" dir="ltr">${escapeHtml(lead.phone_masked ?? '***')}</td>
+              <td class="py-2 px-3 font-semibold">${escapeHtml(lead.status ?? '')}</td>
+              <td class="py-2 px-3">${escapeHtml(lead.source ?? '')}</td>
+              <td class="py-2 px-3 font-mono">${escapeHtml(lead.score ?? '-')}</td>
+              <td class="py-2 px-3">${escapeHtml(lead.treatment_interest ?? '-')}</td>
+            </tr>
+          `).join('');
+        }
+
+        hideDemoBanner();
+        return true;
+      } catch (_err) {
+        showDemoBanner('DEMO DATA — تعذّر الاتصال بـ ClinicOS Dashboard API؛ يتم عرض البيانات التجريبية المحلية.');
+        return false;
+      }
+    }
+
     function renderDashboard() {
       document.getElementById('kpiBookings').textContent = String(state.appointments.length);
       document.getElementById('kpiLifecycle').textContent = String(state.lifecycleCount);
@@ -408,7 +585,7 @@
       } else {
         botStatus.textContent = 'نشط (يرد تلقائياً)';
         botStatus.className = 'text-base font-bold text-emerald-600 mt-1';
-        botSub.textContent = 'GPT-4.1 Mini + SQL';
+        botSub.textContent = 'GPT-4.1 + SQL';
       }
 
       const pendingBadge = document.getElementById('pendingBadge');
@@ -431,10 +608,10 @@
 
       tbody.innerHTML = state.appointments.map(appt => `
         <tr class="msg-enter bg-emerald-500/5">
-          <td class="py-3 px-3 font-bold">${appt.patient}</td>
-          <td class="py-3 px-3">${appt.service}</td>
-          <td class="py-3 px-3">${appt.doctor}</td>
-          <td class="py-3 px-3 font-mono">${appt.date} (${appt.time})</td>
+          <td class="py-3 px-3 font-bold">${escapeHtml(appt.patient)}</td>
+          <td class="py-3 px-3">${escapeHtml(appt.service)}</td>
+          <td class="py-3 px-3">${escapeHtml(appt.doctor)}</td>
+          <td class="py-3 px-3 font-mono">${escapeHtml(appt.date)} (${escapeHtml(appt.time)})</td>
           <td class="py-3 px-3">
             ${appt.reminderSent
               ? '<span class="px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-600 font-semibold">تم الإرسال ✅</span>'
@@ -569,7 +746,7 @@
 
       // Medical / Human handoff detection
       if (text.includes('ألم') || text.includes('الم') || text.includes('ضرسي') || text.includes('موظف') || text.includes('دكتور')) {
-        logEngine('stage-ai', 'AI Receptionist (GPT-4.1-mini): تصنيف الرسالة intent="human_handoff" (needs_human=true).', 'Execution #126');
+        logEngine('stage-ai', 'AI Receptionist (GPT-4.1): تصنيف الرسالة intent="human_handoff" (needs_human=true).', 'Execution #126');
         await sleep(450);
         logEngine('stage-outbox', 'Save State & Enqueue: تحويل المحادثة لـ human + إرسال تنبيه واتساب لموظف الاستقبال (+966509998877).', 'Execution #126 (Success ✓)');
 
@@ -786,6 +963,8 @@
       state.autoPlaying = false;
       document.getElementById('autoPlayLabel').textContent = '🎬 إعادة تشغيل سيناريو الفيديو';
     }
+
+    loadLiveDashboard();
   </script>
 </body>
 </html>

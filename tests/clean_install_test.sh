@@ -130,7 +130,9 @@ const [repoDir, outSqlPath] = process.argv.slice(2);
 const workflowFiles = [
   'workflow/clinicos-main-engine.json',
   'workflow/clinicos-main-engine.l2v.json',
-];
+  'workflow/clinicos-l2v-sla-tick.json',
+  'workflow/clinicos-dashboard-api.json',
+].filter((rel) => fs.existsSync(path.join(repoDir, rel)));
 
 function stripSqlComments(sql) {
   let out = '';

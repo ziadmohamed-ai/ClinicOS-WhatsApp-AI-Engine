@@ -673,4 +673,76 @@ end $$;
 reset role;
 reset clinicos.seed_clinic_id;
 
+-- 13. T10: l2v.recent_leads phone masking (all but last 3 digits), 50-row cap, NULL guards, and role permissions
+do $$
+declare
+  v_clinic uuid;
+  v_other_clinic uuid;
+  v_cid uuid;
+  v_i integer;
+  v_rows integer;
+  v_masked text;
+begin
+  insert into public.clinics (name, timezone) values ('T10 Dashboard Clinic', 'Africa/Cairo') returning id into v_clinic;
+  insert into public.clinics (name, timezone) values ('T10 Foreign Clinic', 'Africa/Cairo') returning id into v_other_clinic;
+
+  -- Foreign clinic lead must never appear in v_clinic results
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_other_clinic, '+201009876543', 'Foreign') returning id into v_cid;
+  perform l2v.capture_lead(v_other_clinic, v_cid, 'organic');
+
+  -- Short phone edge case (<=3 digits) -> '***'
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+12', 'ShortPhone') returning id into v_cid;
+  perform l2v.capture_lead(v_clinic, v_cid, 'organic');
+  select phone_masked into v_masked from l2v.recent_leads(v_clinic, 50) limit 1;
+  assert v_masked = '***', 'T10: <=3 digit phone must mask to ***, got ' || coalesce(v_masked, 'null');
+
+  -- Insert 55 additional leads with strictly increasing created_at to test 50-row upper cap and E.164 masking (+*********NNN)
+  for v_i in 1..55 loop
+    insert into public.contacts (clinic_id, phone_e164, name)
+    values (v_clinic, '+20100111' || lpad(v_i::text, 4, '0'), 'Lead ' || v_i)
+    returning id into v_cid;
+    perform l2v.capture_lead(v_clinic, v_cid, case when v_i % 2 = 0 then 'click_to_whatsapp' else 'organic' end, 'camp', 'تبييض');
+    update l2v.leads set created_at = now() + make_interval(secs => v_i) where contact_id = v_cid;
+  end loop;
+
+  select count(*)::int into v_rows from l2v.recent_leads(v_clinic, 500);
+  assert v_rows = 50, 'T10: recent_leads must cap at 50 rows even when p_limit=500, got ' || v_rows;
+
+  select count(*)::int into v_rows from l2v.recent_leads(v_clinic, null);
+  assert v_rows = 50, 'T10: recent_leads(null limit) defaults to 50 rows, got ' || v_rows;
+
+  select count(*)::int into v_rows from l2v.recent_leads(v_clinic, -5);
+  assert v_rows = 1, 'T10: recent_leads(<=0 limit) clamps to 1 row, got ' || v_rows;
+
+  select count(*)::int into v_rows from l2v.recent_leads(null, 50);
+  assert v_rows = 0, 'T10: recent_leads(null clinic) returns 0 rows';
+
+  -- Confirm zero unmasked full phone prefixes leak and last 3 digits match
+  assert not exists (
+    select 1 from l2v.recent_leads(v_clinic, 50) where phone_masked like '+201%'
+  ), 'T10: raw +201 prefix leaked in phone_masked!';
+
+  select phone_masked into v_masked
+    from l2v.recent_leads(v_clinic, 50)
+   where phone_masked like '%055'
+   limit 1;
+  assert v_masked = '+*********055', 'T10: expected +*********055 for +201001110055, got ' || coalesce(v_masked, 'null');
+
+  raise notice 'T10 recent_leads (masking, 50-row cap, clinic scope, NULL boundaries): OK';
+end $$;
+
+set role anon;
+do $$ begin
+  begin perform 1 from l2v.recent_leads(gen_random_uuid(), 10); raise exception 'anon called recent_leads';
+  exception when insufficient_privilege then raise notice 'anon recent_leads denied'; end;
+end $$;
+reset role;
+
+set role clinicos_api_owner;
+do $$ begin
+  perform 1 from l2v.recent_leads(gen_random_uuid(), 10);
+  raise notice 'runtime role recent_leads allowed';
+end $$;
+reset role;
+
 

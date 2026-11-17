@@ -707,6 +707,59 @@ as $$
    order by d.day;
 $$;
 
+-- Latest leads for the clinic dashboard (max 50), with phone numbers masked
+-- so all digits except the last 3 digits are replaced with '*'.
+create function l2v.recent_leads(p_clinic_id uuid, p_limit integer default 50)
+returns table (
+  lead_id            uuid,
+  phone_masked       text,
+  status             text,
+  source             text,
+  score              smallint,
+  campaign           text,
+  treatment_interest text,
+  created_at         timestamptz
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  with lim as (
+    select least(greatest(coalesce(p_limit, 50), 1), 50) as n
+  ),
+  raw_leads as (
+    select l.id as lead_id,
+           pg_catalog.regexp_replace(coalesce(c.phone_e164, ''), '[^0-9]', '', 'g') as digits,
+           l.status,
+           l.source,
+           l.score,
+           l.campaign,
+           l.treatment_interest,
+           l.created_at
+      from l2v.leads l
+      join public.contacts c
+        on c.id = l.contact_id
+       and c.clinic_id = l.clinic_id
+     where p_clinic_id is not null
+       and l.clinic_id = p_clinic_id
+     order by l.created_at desc, l.id desc
+     limit (select n from lim)
+  )
+  select r.lead_id,
+         case
+           when length(r.digits) <= 3 then '***'
+           else '+' || repeat('*', length(r.digits) - 3) || right(r.digits, 3)
+         end as phone_masked,
+         r.status,
+         r.source,
+         r.score,
+         r.campaign,
+         r.treatment_interest,
+         r.created_at
+    from raw_leads r;
+$$;
+
 -- ---------------------------------------------------------------------
 -- Security: RLS on with no policies (nothing readable directly); all access
 -- goes through the SECURITY DEFINER functions above. Only the ClinicOS runtime
@@ -738,7 +791,8 @@ begin
         l2v.rep_ack(uuid, text),
         l2v.close_lead(uuid, uuid),
         l2v.escalate_overdue(),
-        l2v.kpi_daily(uuid, date, date)
+        l2v.kpi_daily(uuid, date, date),
+        l2v.recent_leads(uuid, integer)
         to %I', v_role);
     end if;
   end loop;

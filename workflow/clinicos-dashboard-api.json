@@ -1,0 +1,312 @@
+{
+  "id": "YOUR_WORKFLOW_ID",
+  "name": "ClinicOS Dashboard API",
+  "active": true,
+  "isArchived": false,
+  "versionId": "YOUR_WORKFLOW_VERSION_ID",
+  "activeVersionId": "YOUR_WORKFLOW_VERSION_ID",
+  "triggerCount": 2,
+  "nodeCount": 9,
+  "createdAt": "2026-11-06T08:25:16.049Z",
+  "updatedAt": "2026-11-11T13:13:28.512Z",
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "binaryMode": "separate"
+  },
+  "tags": [],
+  "parentFolderId": null,
+  "description": "ClinicOS Dashboard API: header-authenticated GET endpoint returning l2v.kpi_daily (<=90 days) and latest 50 masked leads.",
+  "scopes": [
+    "execution:delete",
+    "execution:list",
+    "execution:read",
+    "execution:reveal",
+    "workflow:create",
+    "workflow:delete",
+    "workflow:disableRedaction",
+    "workflow:enableRedaction",
+    "workflow:execute",
+    "workflow:execute-chat",
+    "workflow:export",
+    "workflow:import",
+    "workflow:list",
+    "workflow:move",
+    "workflow:publish",
+    "workflow:read",
+    "workflow:share",
+    "workflow:unpublish",
+    "workflow:unshare",
+    "workflow:update"
+  ],
+  "canExecute": true,
+  "connections": {
+    "Dashboard Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Query Params",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Query Params": {
+      "main": [
+        [
+          {
+            "node": "Is Valid Request?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid Request?": {
+      "main": [
+        [
+          {
+            "node": "Fetch Dashboard Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Bad Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Dashboard Data": {
+      "main": [
+        [
+          {
+            "node": "Format Dashboard Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Dashboard Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Dashboard JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Log Workflow Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "clinicos/dashboard",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Dashboard Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        240
+      ],
+      "webhookId": "YOUR_DASHBOARD_GET_WEBHOOK_ID",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_DASHBOARD_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "ClinicOS Dashboard Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Validates GET query parameters (?from=YYYY-MM-DD&to=YYYY-MM-DD) for ClinicOS Dashboard API.\n// Fails closed (valid: false, status_code: 400) on missing, malformed, reversed, or >90-day ranges.\n\nconst item = typeof $json !== \"undefined\" && $json && typeof $json === \"object\" ? $json : {};\nconst query = item.query && typeof item.query === \"object\" && !Array.isArray(item.query) ? item.query : {};\n\nfunction parseStrictIsoDate(val) {\n  if (typeof val !== \"string\") return null;\n  const trimmed = val.trim();\n  if (trimmed.length !== 10 || !/^\\d{4}-\\d{2}-\\d{2}$/.test(trimmed)) return null;\n  const [yStr, mStr, dStr] = trimmed.split(\"-\");\n  const y = Number(yStr);\n  const m = Number(mStr);\n  const d = Number(dStr);\n  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return null;\n  if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return null;\n  const dt = new Date(Date.UTC(y, m - 1, d));\n  if (\n    Number.isNaN(dt.getTime()) ||\n    dt.getUTCFullYear() !== y ||\n    dt.getUTCMonth() !== m - 1 ||\n    dt.getUTCDate() !== d\n  ) {\n    return null;\n  }\n  return { iso: trimmed, ms: dt.getTime() };\n}\n\nconst parsedFrom = parseStrictIsoDate(query.from);\nconst parsedTo = parseStrictIsoDate(query.to);\n\nif (!parsedFrom || !parsedTo) {\n  return {\n    json: {\n      valid: false,\n      status_code: 400,\n      error: \"invalid_date_params\",\n    },\n  };\n}\n\nif (parsedFrom.ms > parsedTo.ms) {\n  return {\n    json: {\n      valid: false,\n      status_code: 400,\n      error: \"from_after_to\",\n    },\n  };\n}\n\nconst inclusiveDays = Math.round((parsedTo.ms - parsedFrom.ms) / 86400000) + 1;\nif (inclusiveDays < 1 || inclusiveDays > 90) {\n  return {\n    json: {\n      valid: false,\n      status_code: 400,\n      error: \"date_range_exceeds_90_days\",\n    },\n  };\n}\n\nreturn {\n  json: {\n    valid: true,\n    from: parsedFrom.iso,\n    to: parsedTo.iso,\n    days: inclusiveDays,\n  },\n};\n"
+      },
+      "id": "c1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Validate Query Params",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Is Valid Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        720,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH clinic AS (\n  SELECT id, count(*) OVER ()::int AS clinic_cnt\n  FROM public.clinics\n),\nsingle_clinic AS (\n  SELECT id\n  FROM clinic\n  WHERE clinic_cnt = 1\n)\nSELECT\n  (SELECT count(*)::int FROM public.clinics) AS clinic_count,\n  COALESCE(\n    (SELECT jsonb_agg(to_jsonb(k) ORDER BY k.day ASC)\n     FROM single_clinic sc\n     CROSS JOIN LATERAL l2v.kpi_daily(sc.id, $1::date, $2::date) AS k),\n    '[]'::jsonb\n  ) AS kpi_daily,\n  COALESCE(\n    (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.created_at DESC)\n     FROM single_clinic sc\n     CROSS JOIN LATERAL l2v.recent_leads(sc.id, 50) AS r),\n    '[]'::jsonb\n  ) AS leads;",
+        "options": {
+          "queryBatching": "single",
+          "queryReplacement": "={{ [$json.from, $json.to] }}"
+        }
+      },
+      "id": "c1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Fetch Dashboard Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        960,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "ClinicOS Runtime PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Formats the Postgres response for ClinicOS Dashboard API.\n// Fails closed if clinic_count !== 1, caps leads at 50, and enforces phone masking\n// (all digits masked except the last 3 digits) as defense-in-depth.\n\nconst row = typeof $json !== \"undefined\" && $json && typeof $json === \"object\" ? $json : {};\nconst clinicCount = Number(row.clinic_count ?? 0);\n\nif (!Number.isInteger(clinicCount) || clinicCount !== 1) {\n  throw new Error(`Dashboard API requires exactly 1 clinic row in public.clinics (found ${clinicCount})`);\n}\n\nlet reqMeta = { from: null, to: null };\ntry {\n  const v = $(\"Validate Query Params\").item?.json;\n  if (v && typeof v === \"object\") {\n    reqMeta = { from: v.from ?? null, to: v.to ?? null };\n  }\n} catch {\n  try {\n    const idx = typeof $itemIndex === \"number\" ? $itemIndex : 0;\n    const v = $(\"Validate Query Params\").all()?.[idx]?.json;\n    if (v && typeof v === \"object\") {\n      reqMeta = { from: v.from ?? null, to: v.to ?? null };\n    }\n  } catch {\n    reqMeta = { from: null, to: null };\n  }\n}\n\nfunction maskPhoneLast3(value) {\n  if (typeof value === \"string\" && /^\\+\\*+\\d{3}$/.test(value.trim())) {\n    return value.trim();\n  }\n  const digits = String(value ?? \"\").replace(/\\D+/g, \"\");\n  if (digits.length <= 3) {\n    return \"***\";\n  }\n  return \"+\" + \"*\".repeat(digits.length - 3) + digits.slice(-3);\n}\n\nconst rawKpis = Array.isArray(row.kpi_daily)\n  ? row.kpi_daily\n  : typeof row.kpi_daily === \"string\"\n    ? JSON.parse(row.kpi_daily)\n    : [];\n\nconst kpiDaily = rawKpis.map((k) => {\n  const out = {\n    day: String(k?.day ?? \"\"),\n    leads: Number(k?.leads ?? 0),\n    hot_leads: Number(k?.hot_leads ?? 0),\n    avg_first_reply_s:\n      k?.avg_first_reply_s === null || k?.avg_first_reply_s === undefined\n        ? null\n        : Number(k.avg_first_reply_s),\n    escalations: Number(k?.escalations ?? 0),\n    booked_leads: Number(k?.booked_leads ?? 0),\n    visits: Number(k?.visits ?? 0),\n    no_shows: Number(k?.no_shows ?? 0),\n  };\n  if (k && Object.prototype.hasOwnProperty.call(k, \"leads_ads\")) {\n    out.leads_ads = Number(k.leads_ads ?? 0);\n  }\n  if (k && Object.prototype.hasOwnProperty.call(k, \"leads_organic\")) {\n    out.leads_organic = Number(k.leads_organic ?? 0);\n  }\n  return out;\n});\n\nconst rawLeads = Array.isArray(row.leads)\n  ? row.leads\n  : typeof row.leads === \"string\"\n    ? JSON.parse(row.leads)\n    : [];\n\nconst leads = rawLeads.slice(0, 50).map((l) => ({\n  lead_id: l?.lead_id ? String(l.lead_id) : null,\n  phone_masked: maskPhoneLast3(l?.phone_masked ?? l?.phone_e164 ?? l?.phone ?? \"\"),\n  status: String(l?.status ?? \"new\"),\n  source: String(l?.source ?? \"organic\"),\n  score: l?.score === null || l?.score === undefined ? null : Number(l.score),\n  campaign: l?.campaign ? String(l.campaign) : null,\n  treatment_interest: l?.treatment_interest ? String(l.treatment_interest) : null,\n  created_at: l?.created_at ? String(l.created_at) : null,\n}));\n\nreturn {\n  json: {\n    ok: true,\n    from: reqMeta.from,\n    to: reqMeta.to,\n    kpi_daily: kpiDaily,\n    leads,\n  },\n};\n"
+      },
+      "id": "c1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Format Dashboard Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "c1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Respond Dashboard JSON",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1440,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ ({ ok: false, error: $json.error || 'bad_request' }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "c1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Respond Bad Request",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        960,
+        360
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "4e678cd1-24da-4f24-882b-31f1aaef941b",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {
+          "queryBatching": "single",
+          "queryReplacement": "={{ [$json.workflow?.name || 'ClinicOS - Main Engine', String($json.execution?.id || ''), $json.execution?.lastNodeExecuted || $json.trigger?.error?.node?.name || 'unknown', $json.execution?.error?.name || $json.trigger?.error?.name || 'Error'] }}"
+        },
+        "query": "SELECT public.log_workflow_error($1::text, $2::text, $3::text, $4::text) AS result;"
+      },
+      "id": "74ebd490-d6d6-44db-9b98-346b821915a4",
+      "name": "Log Workflow Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        48,
+        -192
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "ClinicOS Runtime PostgreSQL"
+        }
+      }
+    }
+  ],
+  "nodeGroups": [],
+  "activeVersion": {
+    "sameAsDraft": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "templateCredsSetupCompleted": true
+  }
+}
