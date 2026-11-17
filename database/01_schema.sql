@@ -6,6 +6,8 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "btree_gist";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+CREATE SCHEMA IF NOT EXISTS private;
+
 -- 1. Clinics Table
 CREATE TABLE IF NOT EXISTS public.clinics (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -65,12 +67,14 @@ CREATE TABLE IF NOT EXISTS public.contacts (
     phone_e164 TEXT NOT NULL,
     name TEXT,
     language TEXT NOT NULL DEFAULT 'ar',
+    profile JSONB NOT NULL DEFAULT '{}'::jsonb,
     opted_out_at TIMESTAMPTZ,
     communications_opted_out_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_clinic_contact_phone UNIQUE (clinic_id, phone_e164)
 );
+ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS profile JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_contacts_lookup ON public.contacts(clinic_id, phone_e164);
 
 -- 7. Conversations

@@ -60,33 +60,6 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
--- private.claim_outbox_batch_with_route(p_batch_size integer, p_clinic_id uuid)
--- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION private.claim_outbox_batch_with_route(p_batch_size integer DEFAULT 10, p_clinic_id uuid DEFAULT NULL::uuid)
- RETURNS TABLE(outbox_id uuid, clinic_id uuid, contact_id uuid, recipient_phone text, message_kind text, payload jsonb, attempt_count integer, max_attempts integer, claim_token uuid, claimed_at timestamp with time zone, phone_number_id text)
- LANGUAGE sql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-  SELECT
-    claimed.outbox_id,
-    claimed.clinic_id,
-    claimed.contact_id,
-    claimed.recipient_phone,
-    claimed.message_kind,
-    claimed.payload,
-    claimed.attempt_count,
-    claimed.max_attempts,
-    claimed.claim_token,
-    claimed.claimed_at,
-    NULLIF(pg_catalog.btrim(clinic.settings->>'whatsapp_phone_number_id'), '') AS phone_number_id
-  FROM public.claim_outbox_batch(p_batch_size, p_clinic_id) AS claimed
-  LEFT JOIN public.clinics AS clinic
-    ON clinic.id = claimed.clinic_id
-  ORDER BY claimed.claimed_at, claimed.outbox_id;
-$function$;
-
--- ---------------------------------------------------------------------
 -- private.get_clinicos_meta_secret(p_secret_name text)
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION private.get_clinicos_meta_secret(p_secret_name text)
@@ -191,9 +164,10 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
--- public.apply_voice_transcription(p_batch_result jsonb, p_transcript text)
+-- public.apply_voice_transcription(p_batch_result jsonb, p_transcript text, p_message_id uuid)
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.apply_voice_transcription(p_batch_result jsonb, p_transcript text)
+DROP FUNCTION IF EXISTS public.apply_voice_transcription(jsonb, text);
+CREATE OR REPLACE FUNCTION public.apply_voice_transcription(p_batch_result jsonb, p_transcript text, p_message_id uuid DEFAULT NULL::uuid)
  RETURNS jsonb
  LANGUAGE plpgsql
  SECURITY DEFINER
@@ -201,6 +175,10 @@ CREATE OR REPLACE FUNCTION public.apply_voice_transcription(p_batch_result jsonb
 AS $function$
 DECLARE
     v_clean text := btrim(coalesce(p_transcript, ''));
+    v_msgs jsonb;
+    v_len integer;
+    v_idx integer;
+    v_elem jsonb;
     v_clinic_id uuid;
     v_message_id uuid;
 BEGIN
@@ -208,13 +186,48 @@ BEGIN
         RETURN jsonb_build_object('ok', false, 'messages', '[]'::jsonb);
     END IF;
 
-    IF v_clean = '' OR jsonb_typeof(p_batch_result->'messages') <> 'array' OR jsonb_array_length(p_batch_result->'messages') = 0 THEN
+    v_msgs := p_batch_result->'messages';
+    IF v_clean = '' OR jsonb_typeof(v_msgs) <> 'array' THEN
         RETURN p_batch_result;
     END IF;
 
+    v_len := jsonb_array_length(v_msgs);
+    IF v_len = 0 THEN
+        RETURN p_batch_result;
+    END IF;
+
+    FOR v_i IN 0 .. v_len - 1 LOOP
+        v_elem := v_msgs->v_i;
+        IF p_message_id IS NOT NULL THEN
+            IF (v_elem ->> 'message_id') = p_message_id::text THEN
+                v_idx := v_i;
+                EXIT;
+            END IF;
+        ELSE
+            IF coalesce(v_elem ->> 'conversation_status', '') <> 'human'
+               AND coalesce((v_elem ->> 'opted_out')::boolean, false) = false
+               AND nullif(coalesce(v_elem ->> 'opt_out_scope', ''), '') IS NULL
+               AND lower(coalesce(v_elem ->> 'message_type', '')) IN ('audio', 'voice')
+               AND coalesce(
+                   nullif(v_elem #>> '{payload,audio,id}', ''),
+                   nullif(v_elem #>> '{payload,voice,id}', '')
+               ) IS NOT NULL THEN
+                v_idx := v_i;
+                EXIT;
+            END IF;
+        END IF;
+    END LOOP;
+
+    IF v_idx IS NULL THEN
+        IF p_message_id IS NOT NULL THEN
+            RETURN p_batch_result;
+        END IF;
+        v_idx := 0;
+    END IF;
+
     BEGIN
-        v_clinic_id := (p_batch_result #>> '{messages,0,clinic_id}')::uuid;
-        v_message_id := (p_batch_result #>> '{messages,0,message_id}')::uuid;
+        v_clinic_id := (v_msgs #>> ARRAY[v_idx::text, 'clinic_id'])::uuid;
+        v_message_id := (v_msgs #>> ARRAY[v_idx::text, 'message_id'])::uuid;
     EXCEPTION WHEN OTHERS THEN
         RETURN p_batch_result;
     END;
@@ -233,7 +246,7 @@ BEGIN
 
     RETURN jsonb_set(
         p_batch_result,
-        '{messages,0,body}',
+        ARRAY['messages', v_idx::text, 'body'],
         to_jsonb(left(v_clean, 4096))
     );
 END;
@@ -438,326 +451,9 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
--- public.book_appointment(p_clinic_id uuid, p_contact_id uuid, p_provider_id uuid, p_service_id uuid, p_starts_at timestamp with time zone, p_source text)
--- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.book_appointment(p_clinic_id uuid, p_contact_id uuid, p_provider_id uuid, p_service_id uuid, p_starts_at timestamp with time zone, p_source text DEFAULT 'whatsapp'::text)
- RETURNS jsonb
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-DECLARE
-    v_timezone text;
-    v_settings jsonb;
-    v_language text;
-    v_provider_name text;
-    v_service_name text;
-    v_duration_minutes integer;
-    v_slot_step_minutes integer;
-    v_min_notice_minutes integer;
-    v_max_days_ahead integer;
-    v_start_local timestamp without time zone;
-    v_end_at timestamptz;
-    v_end_local timestamp without time zone;
-    v_template text;
-    v_message text;
-    v_appointment_id uuid;
-BEGIN
-    IF p_clinic_id IS NULL OR p_contact_id IS NULL OR p_provider_id IS NULL
-       OR p_service_id IS NULL OR p_starts_at IS NULL THEN
-        RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
-    END IF;
-
-    SELECT c.timezone, c.settings
-    INTO v_timezone, v_settings
-    FROM public.clinics AS c
-    WHERE c.id = p_clinic_id;
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
-    END IF;
-
-    SELECT ct.language
-    INTO v_language
-    FROM public.contacts AS ct
-    WHERE ct.id = p_contact_id
-      AND ct.clinic_id = p_clinic_id;
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
-    END IF;
-
-    SELECT a.id
-    INTO v_appointment_id
-    FROM public.appointments AS a
-    WHERE a.clinic_id = p_clinic_id
-      AND a.contact_id = p_contact_id
-      AND a.provider_id = p_provider_id
-      AND a.service_id = p_service_id
-      AND a.starts_at = p_starts_at
-      AND a.status = 'confirmed'
-    ORDER BY a.created_at, a.id
-    LIMIT 1;
-
-    IF FOUND THEN
-        UPDATE public.conversations
-        SET state = state - 'pending_booking'
-        WHERE clinic_id = p_clinic_id
-          AND contact_id = p_contact_id
-          AND status <> 'closed';
-
-        RETURN jsonb_build_object(
-            'ok', true,
-            'appointment_id', v_appointment_id,
-            'idempotent', true
-        );
-    END IF;
-
-    SELECT s.duration_minutes,
-           CASE WHEN v_language = 'en' THEN s.name_en ELSE s.name_ar END,
-           p.name
-    INTO v_duration_minutes, v_service_name, v_provider_name
-    FROM public.services AS s
-    JOIN public.provider_services AS ps
-      ON ps.clinic_id = s.clinic_id
-     AND ps.service_id = s.id
-     AND ps.provider_id = p_provider_id
-    JOIN public.providers AS p
-      ON p.id = ps.provider_id
-     AND p.clinic_id = ps.clinic_id
-    WHERE s.id = p_service_id
-      AND s.clinic_id = p_clinic_id
-      AND s.active
-      AND p.active;
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('ok', false, 'reason', 'service_not_offered');
-    END IF;
-
-    BEGIN
-        v_slot_step_minutes := COALESCE((v_settings ->> 'slot_step_minutes')::integer, 30);
-        v_min_notice_minutes := COALESCE((v_settings ->> 'min_notice_minutes')::integer, 60);
-        v_max_days_ahead := COALESCE((v_settings ->> 'max_days_ahead')::integer, 30);
-    EXCEPTION
-        WHEN invalid_text_representation OR numeric_value_out_of_range THEN
-            RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
-    END;
-
-    IF v_slot_step_minutes <= 0 OR v_min_notice_minutes < 0 OR v_max_days_ahead < 0 THEN
-        RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
-    END IF;
-
-    IF p_starts_at < now() + make_interval(mins => v_min_notice_minutes) THEN
-        UPDATE public.conversations
-        SET state = state - 'pending_booking'
-        WHERE clinic_id = p_clinic_id
-          AND contact_id = p_contact_id
-          AND status <> 'closed';
-
-        PERFORM public.enqueue_message(
-            p_clinic_id,
-            p_contact_id,
-            'text',
-            jsonb_build_object(
-                'text',
-                CASE WHEN v_language = 'en'
-                    THEN 'That appointment time has passed the minimum booking notice window. Please ask me for new available times.'
-                    ELSE 'عفواً الميعاد ده اقترب جداً وانتهت مهلة الحجز المتاحة له قولي أشوفلك أقرب ميعاد تاني'
-                END
-            ),
-            'appt-too-soon-' || p_contact_id::text || '-' || extract(epoch from p_starts_at)::bigint::text,
-            false
-        );
-
-        RETURN jsonb_build_object('ok', false, 'reason', 'too_soon');
-    END IF;
-
-    IF p_starts_at > now() + make_interval(days => v_max_days_ahead) THEN
-        UPDATE public.conversations
-        SET state = state - 'pending_booking'
-        WHERE clinic_id = p_clinic_id
-          AND contact_id = p_contact_id
-          AND status <> 'closed';
-
-        PERFORM public.enqueue_message(
-            p_clinic_id,
-            p_contact_id,
-            'text',
-            jsonb_build_object(
-                'text',
-                CASE WHEN v_language = 'en'
-                    THEN 'That date is beyond the maximum advance booking window. Please choose a closer date.'
-                    ELSE 'عفواً التاريخ ده أبعد من الفترة المتاحة للحجز حالياً تحب نشوف ميعاد أقرب؟'
-                END
-            ),
-            'appt-too-far-' || p_contact_id::text || '-' || extract(epoch from p_starts_at)::bigint::text,
-            false
-        );
-
-        RETURN jsonb_build_object('ok', false, 'reason', 'too_far');
-    END IF;
-
-    v_start_local := p_starts_at AT TIME ZONE v_timezone;
-    v_end_at := p_starts_at + make_interval(mins => v_duration_minutes);
-    v_end_local := v_end_at AT TIME ZONE v_timezone;
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM public.working_hours AS wh
-        WHERE wh.clinic_id = p_clinic_id
-          AND wh.provider_id = p_provider_id
-          AND wh.weekday = extract(dow FROM v_start_local)::smallint
-          AND v_start_local::time >= wh.start_time
-          AND v_end_local <= date_trunc('day', v_start_local) + wh.end_time
-    ) THEN
-        UPDATE public.conversations
-        SET state = state - 'pending_booking'
-        WHERE clinic_id = p_clinic_id
-          AND contact_id = p_contact_id
-          AND status <> 'closed';
-
-        PERFORM public.enqueue_message(
-            p_clinic_id,
-            p_contact_id,
-            'text',
-            jsonb_build_object(
-                'text',
-                CASE WHEN v_language = 'en'
-                    THEN 'That time is outside the doctor working hours. Please ask me for available times.'
-                    ELSE 'عفواً التوقيت ده خارج مواعيد عمل الدكتور حالياً قولي أعرضلك المواعيد المتاحة'
-                END
-            ),
-            'appt-outside-hours-' || p_contact_id::text || '-' || extract(epoch from p_starts_at)::bigint::text,
-            false
-        );
-
-        RETURN jsonb_build_object('ok', false, 'reason', 'outside_hours');
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM public.working_hours AS wh
-        WHERE wh.clinic_id = p_clinic_id
-          AND wh.provider_id = p_provider_id
-          AND wh.weekday = extract(dow FROM v_start_local)::smallint
-          AND v_start_local::time >= wh.start_time
-          AND v_end_local <= date_trunc('day', v_start_local) + wh.end_time
-          AND mod(
-              extract(epoch FROM (
-                  v_start_local - (date_trunc('day', v_start_local) + wh.start_time)
-              )),
-              v_slot_step_minutes::numeric * 60
-          ) = 0
-    ) THEN
-        RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
-    END IF;
-
-    v_template := v_settings #>> ARRAY['messages', 'booking_confirmed', v_language];
-    IF v_template IS NULL THEN
-        RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
-    END IF;
-
-    BEGIN
-        INSERT INTO public.appointments (
-            clinic_id, contact_id, provider_id, service_id,
-            starts_at, ends_at, source
-        )
-        VALUES (
-            p_clinic_id, p_contact_id, p_provider_id, p_service_id,
-            p_starts_at, v_end_at, p_source
-        )
-        RETURNING id INTO v_appointment_id;
-    EXCEPTION
-        WHEN exclusion_violation THEN
-            SELECT a.id
-            INTO v_appointment_id
-            FROM public.appointments AS a
-            WHERE a.clinic_id = p_clinic_id
-              AND a.contact_id = p_contact_id
-              AND a.provider_id = p_provider_id
-              AND a.service_id = p_service_id
-              AND a.starts_at = p_starts_at
-              AND a.status = 'confirmed'
-            ORDER BY a.created_at, a.id
-            LIMIT 1;
-
-            IF FOUND THEN
-                UPDATE public.conversations
-                SET state = state - 'pending_booking'
-                WHERE clinic_id = p_clinic_id
-                  AND contact_id = p_contact_id
-                  AND status <> 'closed';
-
-                RETURN jsonb_build_object(
-                    'ok', true,
-                    'appointment_id', v_appointment_id,
-                    'idempotent', true
-                );
-            END IF;
-
-            UPDATE public.conversations
-            SET state = state - 'pending_booking'
-            WHERE clinic_id = p_clinic_id
-              AND contact_id = p_contact_id
-              AND status <> 'closed';
-
-            PERFORM public.enqueue_message(
-                p_clinic_id,
-                p_contact_id,
-                'text',
-                jsonb_build_object(
-                    'text',
-                    CASE WHEN v_language = 'en'
-                        THEN 'That time is no longer available, so nothing was booked. Please ask me for available times again.'
-                        ELSE 'الميعاد ده اتشغل للأسف قبل ما نأكده ومتمش تسجيل الحجز تحب أعرضلك المواعيد المتاحة تاني؟'
-                    END
-                ),
-                'appt-slot-taken-' || p_contact_id::text || '-' || extract(epoch from p_starts_at)::bigint::text,
-                false
-            );
-
-            RETURN jsonb_build_object('ok', false, 'reason', 'slot_taken');
-    END;
-
-    UPDATE public.conversations
-    SET state = state - 'pending_booking'
-    WHERE clinic_id = p_clinic_id
-      AND contact_id = p_contact_id
-      AND status <> 'closed';
-
-    -- Always build confirmation text deterministically from DB template
-    v_message := replace(
-        replace(
-            replace(
-                replace(v_template, '{{service}}', v_service_name),
-                '{{doctor}}', v_provider_name
-            ),
-            '{{date}}', to_char(v_start_local, 'YYYY-MM-DD')
-        ),
-        '{{time}}', to_char(v_start_local, 'HH24:MI')
-    );
-
-    PERFORM public.enqueue_message(
-        p_clinic_id,
-        p_contact_id,
-        'text',
-        jsonb_build_object('text', v_message),
-        'appt-confirm-' || v_appointment_id::text,
-        false
-    );
-
-    RETURN jsonb_build_object(
-        'ok', true,
-        'appointment_id', v_appointment_id,
-        'starts_at', p_starts_at,
-        'message_text', v_message
-    );
-END;
-$function$;
-
--- ---------------------------------------------------------------------
 -- public.book_appointment(p_clinic_id uuid, p_contact_id uuid, p_provider_id uuid, p_service_id uuid, p_starts_at timestamp with time zone, p_source text, p_custom_message text)
 -- ---------------------------------------------------------------------
+DROP FUNCTION IF EXISTS public.book_appointment(uuid, uuid, uuid, uuid, timestamp with time zone, text);
 CREATE OR REPLACE FUNCTION public.book_appointment(p_clinic_id uuid, p_contact_id uuid, p_provider_id uuid, p_service_id uuid, p_starts_at timestamp with time zone, p_source text DEFAULT 'whatsapp'::text, p_custom_message text DEFAULT NULL::text)
  RETURNS jsonb
  LANGUAGE plpgsql
@@ -850,6 +546,27 @@ BEGIN
       AND p.active;
 
     IF NOT FOUND THEN
+        UPDATE public.conversations
+        SET state = state - 'pending_booking'
+        WHERE clinic_id = p_clinic_id
+          AND contact_id = p_contact_id
+          AND status <> 'closed';
+
+        PERFORM public.enqueue_message(
+            p_clinic_id,
+            p_contact_id,
+            'text',
+            jsonb_build_object(
+                'text',
+                CASE WHEN v_language = 'en'
+                    THEN 'That service is not currently available with the selected doctor. Please ask me for available times.'
+                    ELSE 'عفواً الخدمة دي مش متاحة حالياً مع الدكتور ده، قولي أعرضلك المواعيد المتاحة'
+                END
+            ),
+            'appt-unoffered-' || p_contact_id::text || '-' || extract(epoch from p_starts_at)::bigint::text,
+            false
+        );
+
         RETURN jsonb_build_object('ok', false, 'reason', 'service_not_offered');
     END IF;
 
@@ -968,6 +685,27 @@ BEGIN
               v_slot_step_minutes::numeric * 60
           ) = 0
     ) THEN
+        UPDATE public.conversations
+        SET state = state - 'pending_booking'
+        WHERE clinic_id = p_clinic_id
+          AND contact_id = p_contact_id
+          AND status <> 'closed';
+
+        PERFORM public.enqueue_message(
+            p_clinic_id,
+            p_contact_id,
+            'text',
+            jsonb_build_object(
+                'text',
+                CASE WHEN v_language = 'en'
+                    THEN 'That exact time does not match an available slot step. Please ask me for available times.'
+                    ELSE 'عفواً التوقيت ده مش مطابق لفترات المواعيد المتاحة، قولي أعرضلك المواعيد المتاحة'
+                END
+            ),
+            'appt-step-invalid-' || p_contact_id::text || '-' || extract(epoch from p_starts_at)::bigint::text,
+            false
+        );
+
         RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
     END IF;
 
@@ -1543,6 +1281,35 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
+-- private.claim_outbox_batch_with_route(p_batch_size integer, p_clinic_id uuid)
+-- Defined after public.claim_outbox_batch so sequential execution works
+-- with default check_function_bodies = on.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION private.claim_outbox_batch_with_route(p_batch_size integer DEFAULT 10, p_clinic_id uuid DEFAULT NULL::uuid)
+ RETURNS TABLE(outbox_id uuid, clinic_id uuid, contact_id uuid, recipient_phone text, message_kind text, payload jsonb, attempt_count integer, max_attempts integer, claim_token uuid, claimed_at timestamp with time zone, phone_number_id text)
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'public'
+AS $function$
+  SELECT
+    claimed.outbox_id,
+    claimed.clinic_id,
+    claimed.contact_id,
+    claimed.recipient_phone,
+    claimed.message_kind,
+    claimed.payload,
+    claimed.attempt_count,
+    claimed.max_attempts,
+    claimed.claim_token,
+    claimed.claimed_at,
+    NULLIF(pg_catalog.btrim(clinic.settings->>'whatsapp_phone_number_id'), '') AS phone_number_id
+  FROM public.claim_outbox_batch(p_batch_size, p_clinic_id) AS claimed
+  LEFT JOIN public.clinics AS clinic
+    ON clinic.id = claimed.clinic_id
+  ORDER BY claimed.claimed_at, claimed.outbox_id;
+$function$;
+
+-- ---------------------------------------------------------------------
 -- public.classify_whatsapp_opt_out_scope(p_body text)
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.classify_whatsapp_opt_out_scope(p_body text)
@@ -1672,9 +1439,10 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
--- public.get_available_slots(p_clinic_id uuid, p_service_id uuid, p_from timestamp with time zone, p_to timestamp with time zone, p_provider_id uuid, p_limit integer)
+-- public.get_available_slots(p_clinic_id uuid, p_service_id uuid, p_from timestamp with time zone, p_to timestamp with time zone, p_provider_id uuid, p_limit integer, p_exclude_appointment_id uuid)
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.get_available_slots(p_clinic_id uuid, p_service_id uuid, p_from timestamp with time zone, p_to timestamp with time zone, p_provider_id uuid DEFAULT NULL::uuid, p_limit integer DEFAULT 10)
+DROP FUNCTION IF EXISTS public.get_available_slots(uuid, uuid, timestamp with time zone, timestamp with time zone, uuid, integer);
+CREATE OR REPLACE FUNCTION public.get_available_slots(p_clinic_id uuid, p_service_id uuid, p_from timestamp with time zone, p_to timestamp with time zone, p_provider_id uuid DEFAULT NULL::uuid, p_limit integer DEFAULT 10, p_exclude_appointment_id uuid DEFAULT NULL::uuid)
  RETURNS TABLE(provider_id uuid, provider_name text, starts_at timestamp with time zone, ends_at timestamp with time zone)
  LANGUAGE plpgsql
  STABLE SECURITY DEFINER
@@ -1807,6 +1575,7 @@ BEGIN
           WHERE a.clinic_id = p_clinic_id
             AND a.provider_id = slot_ranges.offered_provider_id
             AND a.status = 'confirmed'
+            AND (p_exclude_appointment_id IS NULL OR a.id <> p_exclude_appointment_id)
             AND tstzrange(a.starts_at, a.ends_at, '[)')
                 && tstzrange(slot_ranges.slot_start, slot_ranges.slot_end, '[)')
       )
@@ -1964,6 +1733,134 @@ AS $function$
   FROM public.conversations cv
   WHERE cv.clinic_id = p_clinic_id
     AND cv.id = p_conversation_id;
+$function$;
+
+-- ---------------------------------------------------------------------
+-- public.get_patient_profile(p_clinic_id uuid, p_contact_id uuid)
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.get_patient_profile(p_clinic_id uuid, p_contact_id uuid)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ STABLE SECURITY DEFINER
+ SET search_path TO ''
+AS $function$
+DECLARE
+    v_contact record;
+    v_prof jsonb;
+    v_visits integer := 0;
+    v_has_appt boolean := false;
+    v_last_svc_id uuid;
+    v_last_svc_code text;
+    v_last_svc_name text;
+    v_last_prov_id uuid;
+    v_last_prov_name text;
+    v_last_cancelled jsonb;
+    v_recent jsonb;
+BEGIN
+    IF p_clinic_id IS NULL OR p_contact_id IS NULL THEN
+        RETURN '{}'::jsonb;
+    END IF;
+
+    SELECT ct.name, ct.language, coalesce(ct.profile, '{}'::jsonb) AS profile
+    INTO v_contact
+    FROM public.contacts AS ct
+    WHERE ct.clinic_id = p_clinic_id
+      AND ct.id = p_contact_id;
+
+    IF NOT FOUND THEN
+        RETURN '{}'::jsonb;
+    END IF;
+
+    v_prof := v_contact.profile;
+
+    SELECT count(*) FILTER (WHERE a.status = 'completed')::integer,
+           coalesce(bool_or(a.status IN ('confirmed', 'completed')), false)
+    INTO v_visits, v_has_appt
+    FROM public.appointments AS a
+    WHERE a.clinic_id = p_clinic_id
+      AND a.contact_id = p_contact_id;
+
+    SELECT a.service_id, s.code, s.name_ar, a.provider_id, p.name
+    INTO v_last_svc_id, v_last_svc_code, v_last_svc_name, v_last_prov_id, v_last_prov_name
+    FROM public.appointments AS a
+    LEFT JOIN public.services AS s
+      ON s.id = a.service_id AND s.clinic_id = a.clinic_id
+    LEFT JOIN public.providers AS p
+      ON p.id = a.provider_id AND p.clinic_id = a.clinic_id
+    WHERE a.clinic_id = p_clinic_id
+      AND a.contact_id = p_contact_id
+      AND a.status IN ('confirmed', 'completed')
+    ORDER BY a.starts_at DESC, a.created_at DESC
+    LIMIT 1;
+
+    SELECT jsonb_build_object(
+        'appointment_id', a.id,
+        'service_id', a.service_id,
+        'service_code', s.code,
+        'service_name_ar', s.name_ar,
+        'provider_id', a.provider_id,
+        'provider_name', p.name,
+        'starts_at', a.starts_at,
+        'cancelled_at', a.cancelled_at
+    )
+    INTO v_last_cancelled
+    FROM public.appointments AS a
+    LEFT JOIN public.services AS s
+      ON s.id = a.service_id AND s.clinic_id = a.clinic_id
+    LEFT JOIN public.providers AS p
+      ON p.id = a.provider_id AND p.clinic_id = a.clinic_id
+    WHERE a.clinic_id = p_clinic_id
+      AND a.contact_id = p_contact_id
+      AND a.status = 'cancelled'
+    ORDER BY coalesce(a.cancelled_at, a.created_at) DESC, a.id DESC
+    LIMIT 1;
+
+    SELECT coalesce(
+        jsonb_agg(
+            jsonb_build_object(
+                'appointment_id', r.id,
+                'service_code', r.service_code,
+                'service_name_ar', r.service_name_ar,
+                'doctor_name', r.doctor_name,
+                'starts_at', r.starts_at,
+                'status', r.status
+            )
+            ORDER BY r.starts_at DESC, r.id DESC
+        ),
+        '[]'::jsonb
+    )
+    INTO v_recent
+    FROM (
+        SELECT a.id, s.code AS service_code, s.name_ar AS service_name_ar,
+               p.name AS doctor_name, a.starts_at, a.status
+        FROM public.appointments AS a
+        LEFT JOIN public.services AS s
+          ON s.id = a.service_id AND s.clinic_id = a.clinic_id
+        LEFT JOIN public.providers AS p
+          ON p.id = a.provider_id AND p.clinic_id = a.clinic_id
+        WHERE a.clinic_id = p_clinic_id
+          AND a.contact_id = p_contact_id
+        ORDER BY a.starts_at DESC, a.id DESC
+        LIMIT 5
+    ) AS r;
+
+    RETURN jsonb_build_object(
+        'preferred_name', coalesce(nullif(btrim(v_prof ->> 'preferred_name'), ''), nullif(btrim(v_contact.name), '')),
+        'registered_name', nullif(btrim(v_prof ->> 'registered_name'), ''),
+        'booking_phone', nullif(btrim(v_prof ->> 'booking_phone'), ''),
+        'preferred_dialect', coalesce(nullif(btrim(v_prof ->> 'preferred_dialect'), ''), CASE WHEN v_contact.language = 'en' THEN 'en' ELSE 'ar-EG' END),
+        'is_returning_patient', (v_visits > 0 OR v_has_appt),
+        'total_visits_count', v_visits,
+        'last_service_id', coalesce(nullif(btrim(v_prof ->> 'last_service_id'), ''), v_last_svc_id::text),
+        'last_service_code', coalesce(nullif(btrim(v_prof ->> 'last_service_code'), ''), v_last_svc_code),
+        'last_service_name', coalesce(nullif(btrim(v_prof ->> 'last_service_name'), ''), v_last_svc_name),
+        'last_provider_id', coalesce(nullif(btrim(v_prof ->> 'last_provider_id'), ''), v_last_prov_id::text),
+        'last_provider_name', coalesce(nullif(btrim(v_prof ->> 'last_provider_name'), ''), v_last_prov_name),
+        'last_cancelled_appointment', v_last_cancelled,
+        'recent_appointments', v_recent,
+        'notes', coalesce(v_prof ->> 'notes', '')
+    );
+END;
 $function$;
 
 -- ---------------------------------------------------------------------
@@ -2758,6 +2655,31 @@ BEGIN
     WHERE c.id = v_old.clinic_id;
 
     IF NOT FOUND THEN
+        SELECT COALESCE(ct.language, 'ar')
+        INTO v_language
+        FROM public.contacts ct
+        WHERE ct.id = v_old.contact_id
+          AND ct.clinic_id = p_clinic_id;
+
+        UPDATE public.conversations
+        SET state = state - 'pending_booking'
+        WHERE clinic_id = p_clinic_id
+          AND contact_id = v_old.contact_id
+          AND status <> 'closed';
+
+        v_fail_msg := CASE WHEN v_language = 'en'
+            THEN 'Sorry, that service is no longer available with this doctor. Your original appointment is still confirmed as is.'
+            ELSE 'عفواً الخدمة دي مابقتش متاحة حالياً مع الدكتور ده، بس اطمن موعدك الحالي لسه زي ما هو ماتلغاش.'
+        END;
+        PERFORM public.enqueue_message(
+            p_clinic_id,
+            v_old.contact_id,
+            'text',
+            jsonb_build_object('text', v_fail_msg),
+            'appt-resched-unoffered-' || v_old.id::text || '-' || extract(epoch from p_new_starts_at)::bigint::text,
+            false
+        );
+
         RETURN jsonb_build_object('ok', false, 'reason', 'service_not_offered');
     END IF;
 
@@ -2799,6 +2721,22 @@ BEGIN
     END IF;
 
     IF p_new_starts_at > now() + make_interval(days => v_max_days_ahead) THEN
+        UPDATE public.conversations
+        SET state = state - 'pending_booking'
+        WHERE clinic_id = p_clinic_id
+          AND contact_id = v_old.contact_id
+          AND status <> 'closed';
+
+        v_fail_msg := CASE WHEN v_language = 'en'
+            THEN 'Sorry, that date is beyond the advance booking window. Your original appointment is still confirmed as is.'
+            ELSE 'معلش التاريخ الجديد أبعد من الفترة المتاحة للحجز حالياً، بس اطمن موعدك الحالي لسه زي ما هو ماتلغاش. تحب نختار وقت أقرب؟'
+        END;
+        PERFORM public.enqueue_message(
+            p_clinic_id, v_old.contact_id, 'text',
+            jsonb_build_object('text', v_fail_msg),
+            'appt-resched-far-' || v_old.id::text || '-' || extract(epoch from p_new_starts_at)::bigint::text,
+            false
+        );
         RETURN jsonb_build_object('ok', false, 'reason', 'too_far');
     END IF;
 
@@ -2845,6 +2783,22 @@ BEGIN
               v_slot_step_minutes::numeric * 60
           ) = 0
     ) THEN
+        UPDATE public.conversations
+        SET state = state - 'pending_booking'
+        WHERE clinic_id = p_clinic_id
+          AND contact_id = v_old.contact_id
+          AND status <> 'closed';
+
+        v_fail_msg := CASE WHEN v_language = 'en'
+            THEN 'Sorry, that exact time does not match an available slot step. Your current appointment is still kept as is.'
+            ELSE 'معلش التوقيت ده مش مطابق لفترات المواعيد المتاحة، وموعدك الحالي لسه زي ما هو ماتلغاش. تحب نختار وقت تاني؟'
+        END;
+        PERFORM public.enqueue_message(
+            p_clinic_id, v_old.contact_id, 'text',
+            jsonb_build_object('text', v_fail_msg),
+            'appt-resched-step-' || v_old.id::text || '-' || extract(epoch from p_new_starts_at)::bigint::text,
+            false
+        );
         RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
     END IF;
 
@@ -3281,6 +3235,124 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
+-- public.update_patient_profile(p_clinic_id uuid, p_contact_id uuid, p_patch jsonb)
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.update_patient_profile(p_clinic_id uuid, p_contact_id uuid, p_patch jsonb)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO ''
+AS $function$
+DECLARE
+    v_clean jsonb := '{}'::jsonb;
+    v_val text;
+    v_uuid_re constant text := '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+    v_profile jsonb;
+BEGIN
+    IF p_clinic_id IS NULL
+       OR p_contact_id IS NULL
+       OR p_patch IS NULL
+       OR jsonb_typeof(p_patch) <> 'object'
+       OR pg_column_size(p_patch) > 8192 THEN
+        RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'preferred_dialect') = 'string' THEN
+        v_val := btrim(p_patch ->> 'preferred_dialect');
+        IF v_val IN ('ar-EG', 'ar-SA', 'en', 'ar') THEN
+            v_clean := v_clean || jsonb_build_object('preferred_dialect', v_val);
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'preferred_name') = 'string' THEN
+        v_val := nullif(left(btrim(regexp_replace(p_patch ->> 'preferred_name', '[[:cntrl:]]', '', 'g')), 150), '');
+        IF v_val IS NOT NULL THEN
+            v_clean := v_clean || jsonb_build_object('preferred_name', v_val);
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'registered_name') = 'string' THEN
+        v_val := nullif(left(btrim(regexp_replace(p_patch ->> 'registered_name', '[[:cntrl:]]', '', 'g')), 150), '');
+        IF v_val IS NOT NULL THEN
+            v_clean := v_clean || jsonb_build_object('registered_name', v_val);
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'booking_phone') = 'string' THEN
+        v_val := nullif(left(btrim(regexp_replace(p_patch ->> 'booking_phone', '[[:cntrl:]]', '', 'g')), 40), '');
+        IF v_val IS NOT NULL AND v_val ~ '^[+0-9A-Za-z_ -]{4,40}$' THEN
+            v_clean := v_clean || jsonb_build_object('booking_phone', v_val);
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'notes') = 'string' THEN
+        v_val := nullif(left(btrim(regexp_replace(p_patch ->> 'notes', '[[:cntrl:]]', ' ', 'g')), 500), '');
+        IF v_val IS NOT NULL THEN
+            v_clean := v_clean || jsonb_build_object('notes', v_val);
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'last_service_id') = 'string' THEN
+        v_val := btrim(p_patch ->> 'last_service_id');
+        IF v_val ~* v_uuid_re THEN
+            v_clean := v_clean || jsonb_build_object('last_service_id', lower(v_val));
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'last_service_code') = 'string' THEN
+        v_val := nullif(left(btrim(regexp_replace(p_patch ->> 'last_service_code', '[[:cntrl:]]', '', 'g')), 64), '');
+        IF v_val IS NOT NULL THEN
+            v_clean := v_clean || jsonb_build_object('last_service_code', v_val);
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'last_service_name') = 'string' THEN
+        v_val := nullif(left(btrim(regexp_replace(p_patch ->> 'last_service_name', '[[:cntrl:]]', '', 'g')), 150), '');
+        IF v_val IS NOT NULL THEN
+            v_clean := v_clean || jsonb_build_object('last_service_name', v_val);
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'last_provider_id') = 'string' THEN
+        v_val := btrim(p_patch ->> 'last_provider_id');
+        IF v_val ~* v_uuid_re THEN
+            v_clean := v_clean || jsonb_build_object('last_provider_id', lower(v_val));
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(p_patch -> 'last_provider_name') = 'string' THEN
+        v_val := nullif(left(btrim(regexp_replace(p_patch ->> 'last_provider_name', '[[:cntrl:]]', '', 'g')), 150), '');
+        IF v_val IS NOT NULL THEN
+            v_clean := v_clean || jsonb_build_object('last_provider_name', v_val);
+        END IF;
+    END IF;
+
+    UPDATE public.contacts AS ct
+    SET profile = coalesce(ct.profile, '{}'::jsonb) || v_clean,
+        name = coalesce(
+            nullif(btrim(ct.name), ''),
+            nullif(v_clean ->> 'registered_name', ''),
+            nullif(v_clean ->> 'preferred_name', '')
+        ),
+        language = CASE
+            WHEN v_clean ? 'preferred_dialect' AND (v_clean ->> 'preferred_dialect') = 'en' THEN 'en'
+            WHEN v_clean ? 'preferred_dialect' THEN 'ar'
+            ELSE ct.language
+        END,
+        updated_at = now()
+    WHERE ct.clinic_id = p_clinic_id
+      AND ct.id = p_contact_id
+    RETURNING ct.profile INTO v_profile;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'reason', 'not_found');
+    END IF;
+
+    RETURN jsonb_build_object('ok', true, 'profile', v_profile);
+END;
+$function$;
+
+-- ---------------------------------------------------------------------
 -- public.verify_meta_webhook_challenge(p_mode text, p_verify_token text, p_challenge text)
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.verify_meta_webhook_challenge(p_mode text, p_verify_token text, p_challenge text)
@@ -3360,4 +3432,31 @@ BEGIN
   RETURN v_diff = 0;
 END
 $function$;
+
+-- ---------------------------------------------------------------------
+-- Function execution grants (least-privilege runtime roles only)
+-- ---------------------------------------------------------------------
+DO $$
+DECLARE
+  v_role text;
+  v_fns constant text := '
+    public.apply_voice_transcription(jsonb, text, uuid),
+    public.book_appointment(uuid, uuid, uuid, uuid, timestamp with time zone, text, text),
+    public.get_available_slots(uuid, uuid, timestamp with time zone, timestamp with time zone, uuid, integer, uuid),
+    public.get_patient_profile(uuid, uuid),
+    public.reschedule_appointment(uuid, uuid, uuid, timestamp with time zone),
+    public.update_patient_profile(uuid, uuid, jsonb)';
+BEGIN
+  EXECUTE 'REVOKE ALL ON FUNCTION ' || v_fns || ' FROM PUBLIC';
+  FOREACH v_role IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', v_fns, v_role);
+    END IF;
+  END LOOP;
+  FOREACH v_role IN ARRAY ARRAY['clinicos_api_owner', 'service_role'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', v_fns, v_role);
+    END IF;
+  END LOOP;
+END $$;
 

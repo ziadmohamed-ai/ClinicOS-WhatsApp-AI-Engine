@@ -77,3 +77,24 @@ VALUES
   ('5b201616-fdf0-4a37-8863-bd050ea90376', 'f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', 'f0556088-7287-4e55-b8dc-7b935834fef8'),
   ('5b201616-fdf0-4a37-8863-bd050ea90376', 'f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', '0d1b6057-3dba-409f-abfc-f528f6bf1730')
 ON CONFLICT (clinic_id, provider_id, service_id) DO NOTHING;
+
+-- Sample Provider Working Hours (Sunday-Thursday & Saturday 10:00-18:00, idempotent)
+INSERT INTO public.working_hours (clinic_id, provider_id, weekday, start_time, end_time)
+SELECT
+  '5b201616-fdf0-4a37-8863-bd050ea90376'::uuid,
+  p.provider_id,
+  w.weekday,
+  TIME '10:00:00',
+  TIME '18:00:00'
+FROM (VALUES
+  ('a2634639-04fd-4485-bb52-b00ac206976c'::uuid),
+  ('f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d'::uuid)
+) AS p(provider_id)
+CROSS JOIN (VALUES (0::smallint), (1::smallint), (2::smallint), (3::smallint), (4::smallint), (6::smallint)) AS w(weekday)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM public.working_hours AS wh
+  WHERE wh.clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376'::uuid
+    AND wh.provider_id = p.provider_id
+    AND wh.weekday = w.weekday
+);

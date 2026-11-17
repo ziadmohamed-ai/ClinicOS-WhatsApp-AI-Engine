@@ -130,6 +130,30 @@ function validateStructure(wfOrPath, customLabel) {
     }
   }
 
+  const saveNode = wf.nodes.find((n) => n.name === 'Save State & Enqueue');
+  if (saveNode) {
+    assert.ok(
+      !String(saveNode.parameters?.query ?? '').includes("'whatsapp'::text, $17::text"),
+      `${rel}: Save State & Enqueue must not pass $17::text (patient_profile_patch) to book_appointment`
+    );
+  }
+  const saveTxNode = wf.nodes.find((n) => n.name === 'Save & Inject Transcript');
+  if (saveTxNode) {
+    assert.ok(
+      String(saveTxNode.parameters?.query ?? '').includes('$3::text') &&
+        !String(saveTxNode.parameters?.options?.queryReplacement ?? '').includes('messages[0]'),
+      `${rel}: Save & Inject Transcript must pass target voice message_id without hardcoding messages[0]`
+    );
+  }
+  const isVoiceNode = wf.nodes.find((n) => n.name === 'Is Voice Note?');
+  if (isVoiceNode) {
+    const condExpr = String(isVoiceNode.parameters?.conditions?.conditions?.[0]?.leftValue ?? '');
+    assert.ok(
+      condExpr.includes('messages.some(') && !condExpr.includes('messages[0]'),
+      `${rel}: Is Voice Note? must inspect messages.some(...) rather than hardcoding messages[0]`
+    );
+  }
+
   return wf;
 }
 

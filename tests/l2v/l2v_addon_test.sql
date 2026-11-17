@@ -9,7 +9,7 @@ do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'clinicos_api_owner') then create role clinicos_api_owner nologin; end if;
 end $$;
 
-create schema private;
+create schema if not exists private;
 \i :repo/database/01_schema.sql
 \i :fns
 \i :repo/database/05_lead_engine.sql
@@ -515,5 +515,217 @@ begin
 
   raise notice 'T7 customisation preservation after re-seed: OK';
 end $$;
+
+-- 12. Audit fixes verification (inactive staff, outbox KPI, source upgrade, close_lead,
+--     new ad click after conversion, working_hours seed, 7-arg get_available_slots,
+--     patient_profile CRUD, and batch apply_voice_transcription)
+\i :repo/database/04_seed_data.sql
+
+do $$
+declare
+  v_cnt_wh integer;
+begin
+  select count(*)::int into v_cnt_wh
+    from public.working_hours
+   where clinic_id = '5b201616-fdf0-4a37-8863-bd050ea90376';
+  assert v_cnt_wh >= 12, '04_seed_data must seed working_hours (>=12), got ' || v_cnt_wh;
+end $$;
+
+\i :repo/database/04_seed_data.sql
+
+do $$
+declare
+  v_seed_clinic uuid := '5b201616-fdf0-4a37-8863-bd050ea90376';
+  v_svc_id      uuid := '4305027d-539f-4d21-b2bb-4be7d2c73816';
+  v_prov_id     uuid := 'a2634639-04fd-4485-bb52-b00ac206976c';
+  v_patient_id  uuid;
+  v_other_pat   uuid;
+  v_appt_id     uuid;
+  v_slot_ts     timestamptz;
+  v_slot_end    timestamptz;
+  v_slots_cnt   integer;
+  v_lead        uuid;
+  v_lead2       uuid;
+  v_new         boolean;
+  v_ack         record;
+  v_prof        jsonb;
+  v_res         jsonb;
+  v_msg1        uuid := gen_random_uuid();
+  v_msg2        uuid := gen_random_uuid();
+  v_conv_id     uuid;
+  v_reply_s     integer;
+begin
+  -- (a) 04_seed_data idempotent for working_hours (still 12 rows, no duplicates)
+  assert (select count(*) from public.working_hours where clinic_id = v_seed_clinic) = 12,
+    '04_seed_data second run must not duplicate working_hours';
+
+  -- (b) Deactivated rep (+201000000002 was set is_active = false in T7 above):
+  --     is_staff must be false, capture_lead_guarded allows patient capture, rep_ack refuses ack
+  assert not l2v.is_staff(v_seed_clinic, '+201000000002'),
+    'Deactivated rep must not be treated as staff by l2v.is_staff';
+  assert l2v.is_staff(v_seed_clinic, '+201000000003'),
+    'Active rep must remain staff';
+  select * into v_ack from l2v.rep_ack(v_seed_clinic, '+201000000002');
+  assert not v_ack.acked and v_ack.reason = 'none',
+    'Deactivated rep cannot ack pending leads';
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, (select id from public.contacts where clinic_id = v_seed_clinic and phone_e164 = '+201000000002'), 'organic');
+  assert v_lead is not null and v_new,
+    'Deactivated rep messaging as patient can be captured as lead';
+  assert l2v.close_lead(v_seed_clinic, v_lead),
+    'l2v.close_lead closes an open lead cleanly';
+  assert not l2v.close_lead(v_seed_clinic, v_lead),
+    'l2v.close_lead is idempotent (false when already closed)';
+  assert not l2v.close_lead(gen_random_uuid(), v_lead),
+    'l2v.close_lead enforces clinic isolation';
+
+  -- (c) Patient profile CRUD + boundary validation + appointment exclusion in 7-arg get_available_slots
+  insert into public.contacts (clinic_id, phone_e164, name)
+  values (v_seed_clinic, '+201112223334', 'Hossam')
+  returning id into v_patient_id;
+  insert into public.contacts (clinic_id, phone_e164, name)
+  values (v_seed_clinic, '+201112223335', 'Mona')
+  returning id into v_other_pat;
+
+  v_prof := public.get_patient_profile(v_seed_clinic, v_patient_id);
+  assert v_prof ->> 'preferred_name' = 'Hossam'
+     and (v_prof ->> 'is_returning_patient')::boolean = false
+     and (v_prof ->> 'total_visits_count')::int = 0,
+    'Initial patient profile shape';
+  assert public.get_patient_profile(gen_random_uuid(), v_patient_id) = '{}'::jsonb,
+    'Foreign clinic get_patient_profile returns empty object';
+
+  assert (public.update_patient_profile(v_seed_clinic, v_patient_id, null) ->> 'ok')::boolean = false,
+    'update_patient_profile rejects null patch';
+  assert (public.update_patient_profile(v_seed_clinic, v_patient_id, '[]'::jsonb) ->> 'ok')::boolean = false,
+    'update_patient_profile rejects non-object patch';
+  assert (public.update_patient_profile(v_seed_clinic, v_patient_id,
+    jsonb_build_object('notes', repeat('x', 9000))) ->> 'ok')::boolean = false,
+    'update_patient_profile rejects oversized patch (>8KB)';
+
+  v_res := public.update_patient_profile(
+    v_seed_clinic,
+    v_patient_id,
+    jsonb_build_object(
+      'preferred_dialect', 'ar-SA',
+      'registered_name', 'حسام علي',
+      'booking_phone', '+201112223334',
+      'is_returning_patient', true,
+      'injected_admin_flag', 'hacked',
+      'last_service_id', 'not-a-uuid'
+    )
+  );
+  assert (v_res ->> 'ok')::boolean = true, 'update_patient_profile accepts valid fields';
+  v_prof := public.get_patient_profile(v_seed_clinic, v_patient_id);
+  assert v_prof ->> 'preferred_dialect' = 'ar-SA'
+     and v_prof ->> 'registered_name' = 'حسام علي'
+     and v_prof ->> 'booking_phone' = '+201112223334'
+     and (v_prof ->> 'is_returning_patient')::boolean = false
+     and not (v_prof ? 'injected_admin_flag')
+     and (v_prof ->> 'last_service_id') is null,
+    'update_patient_profile strips disallowed keys and invalid UUIDs';
+
+  -- Pick a real open slot using 7-arg get_available_slots, book it, confirm excluded unless passed as p_exclude_appointment_id
+  select starts_at, ends_at into v_slot_ts, v_slot_end
+    from public.get_available_slots(v_seed_clinic, v_svc_id, now() + interval '2 hours', now() + interval '8 days', v_prov_id, 1, null)
+   limit 1;
+  assert v_slot_ts is not null, 'Seeded clinic with working_hours yields open slots';
+
+  insert into public.appointments (clinic_id, contact_id, provider_id, service_id, starts_at, ends_at, status)
+  values (v_seed_clinic, v_patient_id, v_prov_id, v_svc_id, v_slot_ts, v_slot_end, 'confirmed')
+  returning id into v_appt_id;
+
+  select count(*)::int into v_slots_cnt
+    from public.get_available_slots(v_seed_clinic, v_svc_id, v_slot_ts, v_slot_ts, v_prov_id, 5, null);
+  assert v_slots_cnt = 0, 'Booked slot excluded when p_exclude_appointment_id is null';
+
+  select count(*)::int into v_slots_cnt
+    from public.get_available_slots(v_seed_clinic, v_svc_id, v_slot_ts, v_slot_ts, v_prov_id, 5, v_appt_id);
+  assert v_slots_cnt = 1, 'Booked slot included when excluded via p_exclude_appointment_id during reschedule';
+
+  -- Patient now has confirmed appointment -> is_returning_patient becomes true and recent_appointments populated
+  v_prof := public.get_patient_profile(v_seed_clinic, v_patient_id);
+  assert (v_prof ->> 'is_returning_patient')::boolean = true
+     and jsonb_array_length(v_prof -> 'recent_appointments') = 1,
+    'Confirmed appointment flips is_returning_patient and populates recent_appointments';
+
+  -- (d) capture_lead source upgrade ('organic' -> 'click_to_whatsapp') & new ad after conversion
+  select * into v_lead, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_other_pat, 'organic');
+  assert v_new and (select source from l2v.leads where id = v_lead) = 'organic',
+    'Organic capture creates organic lead';
+
+  insert into public.outbox (clinic_id, contact_id, kind, payload, status, idempotency_key, sent_at, created_at)
+  values (
+    v_seed_clinic,
+    v_other_pat,
+    'text',
+    '{"text":"أهلاً بحضرتك"}'::jsonb,
+    'sent',
+    'audit-outbox-' || v_other_pat::text,
+    now() + interval '12 seconds',
+    now() + interval '12 seconds'
+  );
+  update l2v.leads set first_inbound_at = now(), created_at = now() where id = v_lead;
+  select avg_first_reply_s into v_reply_s
+    from l2v.kpi_daily(v_seed_clinic, (now() at time zone 'Asia/Riyadh')::date, (now() at time zone 'Asia/Riyadh')::date);
+  assert v_reply_s between 11 and 13,
+    'kpi_daily computes avg_first_reply_s from public.outbox sent rows (~12s), got ' || coalesce(v_reply_s::text, 'null');
+
+  select * into v_lead2, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_other_pat, 'click_to_whatsapp', 'ad_camp_1', '{"source_id":"ad_100"}'::jsonb);
+  assert v_lead2 = v_lead and not v_new
+     and (select source from l2v.leads where id = v_lead) = 'click_to_whatsapp'
+     and (select campaign from l2v.leads where id = v_lead) = 'ad_camp_1',
+    'Ad click upgrades open organic lead source & campaign';
+
+  insert into public.appointments (clinic_id, contact_id, provider_id, service_id, starts_at, ends_at, status, created_at)
+  values (v_seed_clinic, v_other_pat, v_prov_id, v_svc_id, v_slot_ts + interval '2 days', v_slot_end + interval '2 days', 'confirmed', now() + interval '1 minute');
+
+  -- Same source_id duplicate delivery stays on same lead
+  select * into v_lead2, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_other_pat, 'click_to_whatsapp', 'ad_camp_1', '{"source_id":"ad_100"}'::jsonb);
+  assert v_lead2 = v_lead and not v_new,
+    'Duplicate same-ad delivery stays idempotent on existing lead';
+
+  -- Distinct new ad source_id after prior lead converted closes old lead & creates new lead
+  select * into v_lead2, v_new
+    from l2v.capture_lead_guarded(v_seed_clinic, v_other_pat, 'click_to_whatsapp', 'ad_camp_2', '{"source_id":"ad_200"}'::jsonb);
+  assert v_lead2 <> v_lead and v_new
+     and (select status from l2v.leads where id = v_lead) = 'closed',
+    'New ad after conversion closes prior lead and opens a fresh lead';
+
+  -- (e) apply_voice_transcription updates non-zero batch index accurately
+  insert into public.conversations (clinic_id, contact_id) values (v_seed_clinic, v_other_pat) returning id into v_conv_id;
+  insert into public.messages (id, clinic_id, conversation_id, direction, provider_message_id, message_type, body)
+  values
+    (v_msg1, v_seed_clinic, v_conv_id, 'in', 'wamid.text.1', 'text', 'مرحبا'),
+    (v_msg2, v_seed_clinic, v_conv_id, 'in', 'wamid.voice.2', 'audio', null);
+
+  v_res := public.apply_voice_transcription(
+    jsonb_build_object(
+      'ok', true,
+      'messages', jsonb_build_array(
+        jsonb_build_object('clinic_id', v_seed_clinic, 'message_id', v_msg1, 'message_type', 'text', 'body', 'مرحبا'),
+        jsonb_build_object('clinic_id', v_seed_clinic, 'message_id', v_msg2, 'message_type', 'audio', 'body', null, 'payload', '{"audio":{"id":"media_99"}}'::jsonb)
+      )
+    ),
+    'عايز احجز تنظيف اسنان',
+    v_msg2
+  );
+  assert (v_res #>> '{messages,0,body}') = 'مرحبا'
+     and (v_res #>> '{messages,1,body}') = 'عايز احجز تنظيف اسنان'
+     and (select body from public.messages where id = v_msg2) = 'عايز احجز تنظيف اسنان',
+    'apply_voice_transcription transcribes target batch element [1] without corrupting [0]';
+
+  raise notice 'AUDIT FIXES TESTS (inactive staff, outbox KPI, source upgrade, close_lead, seed hours, slots exclusion, profile RPCs, voice batch): OK';
+end $$;
+
+set role anon;
+do $$ begin
+  begin perform l2v.close_lead(gen_random_uuid(), gen_random_uuid()); raise exception 'anon called close_lead';
+  exception when insufficient_privilege then raise notice 'anon close_lead denied'; end;
+end $$;
+reset role;
 
 

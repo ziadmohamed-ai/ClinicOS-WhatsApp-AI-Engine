@@ -14,7 +14,14 @@ python3 -I - "$REPO/database/02_booking_and_outbox_rpcs.sql" "$FNS" <<'PY'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 lines = open(src, encoding='utf-8').read().split('\n')
-want = ['public.enqueue_message(', 'private.build_whatsapp_message(']
+want = [
+    'public.enqueue_message(',
+    'private.build_whatsapp_message(',
+    'public.get_patient_profile(',
+    'public.update_patient_profile(',
+    'public.get_available_slots(',
+    'public.apply_voice_transcription(',
+]
 out = []
 for w in want:
     i = next(k for k, l in enumerate(lines) if l.startswith('CREATE OR REPLACE FUNCTION ' + w))
