@@ -16,7 +16,7 @@
   },
   "tags": [],
   "parentFolderId": null,
-  "description": "ClinicOS Lead-to-Visit SLA tick: runs l2v.escalate_overdue() every minute and logs workflow errors.",
+  "description": "ClinicOS Lead-to-Visit SLA tick: runs l2v.release_overnight() and l2v.escalate_overdue() every minute and logs workflow errors.",
   "scopes": [
     "execution:delete",
     "execution:list",
@@ -88,7 +88,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT l2v.escalate_overdue() AS escalated;",
+        "query": "SELECT l2v.release_overnight() AS released, l2v.escalate_overdue() AS escalated;",
         "options": {
           "queryBatching": "single"
         }

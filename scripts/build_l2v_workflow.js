@@ -17,7 +17,7 @@ const L2V_PREPARE_NODE_PATH = path.join(REPO_ROOT, 'nodes', 'l2v_prepare.js');
 const DASH_VALIDATE_NODE_PATH = path.join(REPO_ROOT, 'nodes', 'dashboard_validate_query.js');
 const DASH_FORMAT_NODE_PATH = path.join(REPO_ROOT, 'nodes', 'dashboard_format_response.js');
 
-const L2V_ESCALATE_QUERY = 'SELECT l2v.escalate_overdue() AS escalated;';
+const L2V_ESCALATE_QUERY = 'SELECT l2v.release_overnight() AS released, l2v.escalate_overdue() AS escalated;';
 
 const DASHBOARD_API_QUERY = [
   'WITH clinic AS (',
@@ -375,7 +375,7 @@ function buildSlaTickWorkflow() {
     tags: [],
     parentFolderId: null,
     description:
-      'ClinicOS Lead-to-Visit SLA tick: runs l2v.escalate_overdue() every minute and logs workflow errors.',
+      'ClinicOS Lead-to-Visit SLA tick: runs l2v.release_overnight() and l2v.escalate_overdue() every minute and logs workflow errors.',
     scopes: JSON.parse(JSON.stringify(srcWf.scopes)),
     canExecute: true,
     connections: {

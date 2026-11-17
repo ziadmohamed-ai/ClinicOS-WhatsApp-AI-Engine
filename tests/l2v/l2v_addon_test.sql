@@ -745,4 +745,216 @@ do $$ begin
 end $$;
 reset role;
 
+-- 14. T11: working hours (open, closed, boundary minute, Africa/Cairo, null hours = old behaviour),
+--          release_overnight (round-robin, SLA starting at opening time, idempotent),
+--          escalate_overdue closed suppression, and kpi_daily leads_ads / leads_organic split
+do $$
+declare
+  v_clinic       uuid;
+  v_mgr          uuid;
+  v_rep1_c       uuid;
+  v_rep2_c       uuid;
+  v_rep1_id      uuid;
+  v_rep2_id      uuid;
+  v_p_null       uuid;
+  v_p_closed1    uuid;
+  v_p_closed2    uuid;
+  v_p_org        uuid;
+  v_lead_null    uuid;
+  v_lead_c1      uuid;
+  v_lead_c2      uuid;
+  v_lead_org     uuid;
+  v_new          boolean;
+  v_q            record;
+  v_cairo_now    timestamp;
+  v_cairo_dow    smallint;
+  v_other_dow    smallint;
+  v_open_time    time;
+  v_close_time   time;
+  v_expected_due timestamptz;
+  v_actual_due   timestamptz;
+  v_released     integer;
+  v_outbox_before integer;
+  v_kpi          record;
+  v_cols         text[];
+begin
+  -- Verify l2v.kpi_daily exact column order (existing 8 unchanged + leads_ads, leads_organic appended at end)
+  select array_agg(a.attname order by a.attnum)
+    into v_cols
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    cross join unnest(p.proargnames) with ordinality as u(argname, ord)
+    join lateral (select u.argname as attname, u.ord as attnum) a on true
+   where n.nspname = 'l2v'
+     and p.proname = 'kpi_daily'
+     and u.ord > 3; -- skip 3 input params (p_clinic_id, p_from, p_to)
+
+  assert v_cols = array[
+    'day', 'leads', 'hot_leads', 'avg_first_reply_s',
+    'escalations', 'booked_leads', 'visits', 'no_shows',
+    'leads_ads', 'leads_organic'
+  ], 'T11: kpi_daily output columns order mismatch: ' || coalesce(v_cols::text, 'null');
+
+  insert into public.clinics (name, timezone, settings)
+  values (
+    'T11 Cairo Hours Clinic',
+    'Africa/Cairo',
+    '{"whatsapp_templates":{
+        "lead_handoff":{"name":"lead_handoff","language_codes":{"ar":"ar"}},
+        "sla_breach":{"name":"sla_breach","language_codes":{"ar":"ar"}},
+        "sla_breach_no_rep":{"name":"sla_breach_no_rep","language_codes":{"ar":"ar"}}}}'::jsonb
+  ) returning id into v_clinic;
+
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201055500001', 'Mgr')  returning id into v_mgr;
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201055500002', 'RepA') returning id into v_rep1_c;
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201055500003', 'RepB') returning id into v_rep2_c;
+
+  insert into l2v.settings (clinic_id, sla_minutes, manager_contact_id)
+  values (v_clinic, 15, v_mgr);
+  insert into l2v.reps (clinic_id, contact_id, name) values (v_clinic, v_rep1_c, 'RepA') returning id into v_rep1_id;
+  insert into l2v.reps (clinic_id, contact_id, name) values (v_clinic, v_rep2_c, 'RepB') returning id into v_rep2_id;
+
+  -- (a) NULL hours = old behaviour (always open -> immediate assignment)
+  assert l2v.is_clinic_open(v_clinic, '2026-11-17 01:30:00+00'::timestamptz), 'T11: null hours must be always open';
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201155500010', 'PatNull') returning id into v_p_null;
+  select * into v_lead_null, v_new from l2v.capture_lead(v_clinic, v_p_null, 'click_to_whatsapp', 'camp_ad1');
+  select * into v_q from l2v.set_qualification(v_lead_null, 'high', 'now');
+  assert v_q.status = 'hot' and v_q.assignment_id is not null, 'T11: null hours hot lead assigned immediately';
+
+  -- (b) Africa/Cairo timezone & exact boundary-minute checks on 09:00..17:00 Sun..Thu (0..4)
+  --     2026-11-17 is Tuesday (dow=2); Cairo is UTC+2:
+  --       06:59:59Z = 08:59:59 Cairo (closed)
+  --       07:00:00Z = 09:00:00 Cairo (boundary minute -> OPEN)
+  --       14:59:59Z = 16:59:59 Cairo (OPEN)
+  --       15:00:00Z = 17:00:00 Cairo (boundary minute -> CLOSED)
+  --     2026-11-20 is Friday (dow=5 -> CLOSED even at 12:00 Cairo = 10:00Z)
+  update l2v.settings
+     set open_time  = time '09:00:00',
+         close_time = time '17:00:00',
+         open_days  = array[0,1,2,3,4]::smallint[]
+   where clinic_id = v_clinic;
+
+  assert not l2v.is_clinic_open(v_clinic, '2026-11-17 06:59:59+00'::timestamptz), 'T11 Cairo: 08:59:59 must be closed';
+  assert l2v.is_clinic_open(v_clinic, '2026-11-17 07:00:00+00'::timestamptz),     'T11 Cairo: 09:00:00 opening boundary minute must be open';
+  assert l2v.is_clinic_open(v_clinic, '2026-11-17 14:59:59+00'::timestamptz),     'T11 Cairo: 16:59:59 must be open';
+  assert not l2v.is_clinic_open(v_clinic, '2026-11-17 15:00:00+00'::timestamptz), 'T11 Cairo: 17:00:00 closing boundary minute must be closed';
+  assert not l2v.is_clinic_open(v_clinic, '2026-11-20 10:00:00+00'::timestamptz), 'T11 Cairo: Friday (dow=5) must be closed';
+
+  -- (c) Live CLOSED clinic: hot leads stay hot & unassigned; release_overnight() and escalate_overdue() do nothing while closed
+  v_cairo_now := now() at time zone 'Africa/Cairo';
+  v_cairo_dow := extract(dow from v_cairo_now)::smallint;
+  v_other_dow := ((v_cairo_dow + 1) % 7)::smallint;
+
+  update l2v.settings
+     set open_time  = time '09:00:00',
+         close_time = time '17:00:00',
+         open_days  = array[v_other_dow]::smallint[] -- today excluded -> guaranteed closed right now!
+   where clinic_id = v_clinic;
+
+  assert not l2v.is_clinic_open(v_clinic), 'T11: clinic must be closed when today is not in open_days';
+
+  -- Expire PatNull's pending assignment and verify escalate_overdue does NOT escalate or notify manager while closed
+  update l2v.assignments set sla_due_at = now() - interval '10 minutes' where lead_id = v_lead_null;
+  select count(*)::int into v_outbox_before from public.outbox where clinic_id = v_clinic;
+  assert l2v.escalate_overdue() = 0, 'T11: escalate_overdue must not escalate while clinic is closed';
+  assert (select count(*)::int from public.outbox where clinic_id = v_clinic) = v_outbox_before,
+    'T11: escalate_overdue must not notify manager or next rep while clinic is closed';
+  assert (select status from l2v.assignments where lead_id = v_lead_null) = 'pending',
+    'T11: overdue assignment remains pending while clinic is closed';
+
+  -- Ack PatNull's assignment so we isolate overnight leads cleanly
+  update l2v.assignments set status = 'acked', acked_at = now() where lead_id = v_lead_null;
+
+  -- Two hot leads arrive while closed (1 ad, 1 organic) + 1 warm organic lead
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201155500011', 'Overnight1') returning id into v_p_closed1;
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201155500012', 'Overnight2') returning id into v_p_closed2;
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201155500013', 'WarmOrg')    returning id into v_p_org;
+
+  select * into v_lead_c1, v_new from l2v.capture_lead(v_clinic, v_p_closed1, 'click_to_whatsapp', 'night_ad');
+  update l2v.leads set created_at = now() - interval '3 hours', first_inbound_at = now() - interval '3 hours' where id = v_lead_c1;
+  select * into v_q from l2v.set_qualification(v_lead_c1, 'high', 'now', 'تبييض');
+  assert v_q.status = 'hot' and v_q.score = 100 and v_q.assignment_id is null,
+    'T11: hot lead arriving while closed must stay hot and unassigned';
+
+  select * into v_lead_c2, v_new from l2v.capture_lead(v_clinic, v_p_closed2, 'organic');
+  update l2v.leads set created_at = now() - interval '2 hours', first_inbound_at = now() - interval '2 hours' where id = v_lead_c2;
+  select * into v_q from l2v.set_qualification(v_lead_c2, 'mid', 'now', 'تنظيف');
+  assert v_q.status = 'hot' and v_q.score = 85 and v_q.assignment_id is null,
+    'T11: second hot lead arriving while closed must stay hot and unassigned';
+
+  select * into v_lead_org, v_new from l2v.capture_lead(v_clinic, v_p_org, 'organic');
+  perform l2v.set_qualification(v_lead_org, 'low', 'now'); -- warm (65)
+
+  assert (select count(*) from l2v.assignments where lead_id in (v_lead_c1, v_lead_c2)) = 0,
+    'T11: zero assignments created while closed';
+  assert l2v.release_overnight() = 0, 'T11: release_overnight must do nothing while clinic is closed';
+
+  -- (d) Clinic opens (exact boundary minute or 2 minutes ago in Africa/Cairo):
+  --     release_overnight() assigns both unassigned hot leads round-robin (RepB then RepA, since RepA took PatNull),
+  --     sets sla_due_at = opening_time + 15m, and is idempotent on repeat call!
+  v_open_time  := date_trunc('minute', v_cairo_now)::time;
+  v_close_time := (date_trunc('minute', v_cairo_now) + interval '2 hours')::time;
+  update l2v.settings
+     set open_time  = v_open_time,
+         close_time = v_close_time,
+         open_days  = array[v_cairo_dow]::smallint[]
+   where clinic_id = v_clinic;
+
+  assert l2v.is_clinic_open(v_clinic), 'T11: clinic must be open at opening boundary minute';
+
+  v_released := l2v.release_overnight();
+  assert v_released = 2, 'T11: release_overnight must assign the 2 unassigned hot leads, got ' || v_released;
+
+  -- Round-robin check: RepA had PatNull earlier, so Overnight1 goes to RepB and Overnight2 goes to RepA
+  assert (select rep_id from l2v.assignments where lead_id = v_lead_c1) = v_rep2_id,
+    'T11: first overnight lead assigned to least-recently-assigned RepB';
+  assert (select rep_id from l2v.assignments where lead_id = v_lead_c2) = v_rep1_id,
+    'T11: second overnight lead assigned round-robin to RepA';
+
+  -- SLA starting at opening time check
+  v_expected_due := ((v_cairo_now::date + v_open_time) at time zone 'Africa/Cairo') + interval '15 minutes';
+  select sla_due_at into v_actual_due from l2v.assignments where lead_id = v_lead_c1;
+  assert v_actual_due = v_expected_due,
+    'T11: expected sla_due_at = opening_time + 15m (' || v_expected_due || '), got ' || v_actual_due;
+
+  -- Idempotency check: second call to release_overnight() assigns 0 leads and enqueues 0 new messages
+  select count(*)::int into v_outbox_before from public.outbox where clinic_id = v_clinic;
+  assert l2v.release_overnight() = 0, 'T11: release_overnight second call must be idempotent (0)';
+  assert (select count(*)::int from public.outbox where clinic_id = v_clinic) = v_outbox_before,
+    'T11: release_overnight second call must enqueue 0 duplicate handoff messages';
+
+  -- (e) kpi_daily split: leads_ads + leads_organic = leads across multi-day window
+  for v_kpi in
+    select * from l2v.kpi_daily(v_clinic, (v_cairo_now::date - 1), v_cairo_now::date)
+  loop
+    assert v_kpi.leads_ads + v_kpi.leads_organic = v_kpi.leads,
+      'T11: leads_ads + leads_organic must equal leads on ' || v_kpi.day;
+  end loop;
+
+  select sum(leads)::int as leads, sum(leads_ads)::int as ads, sum(leads_organic)::int as org
+    into v_kpi
+    from l2v.kpi_daily(v_clinic, (v_cairo_now::date - 1), v_cairo_now::date);
+  assert v_kpi.leads = 4 and v_kpi.ads = 2 and v_kpi.org = 2,
+    'T11: expected 4 total leads (2 ads + 2 organic), got ' || row_to_json(v_kpi)::text;
+
+  raise notice 'T11 working hours (open/closed/boundary/Africa-Cairo/null), release_overnight idempotent, and kpi split: OK';
+end $$;
+
+set role anon;
+do $$ begin
+  begin perform l2v.release_overnight(); raise exception 'anon called release_overnight';
+  exception when insufficient_privilege then raise notice 'anon release_overnight denied'; end;
+  begin perform l2v.is_clinic_open(gen_random_uuid()); raise exception 'anon called is_clinic_open';
+  exception when insufficient_privilege then null; end;
+end $$;
+reset role;
+
+set role clinicos_api_owner;
+do $$ begin
+  perform l2v.release_overnight();
+  perform l2v.is_clinic_open(gen_random_uuid());
+  raise notice 'runtime role release_overnight & is_clinic_open allowed';
+end $$;
+reset role;
+
 

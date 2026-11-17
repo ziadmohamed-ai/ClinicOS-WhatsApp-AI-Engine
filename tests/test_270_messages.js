@@ -2343,13 +2343,13 @@ addTest('L2V SLA Tick Workflow: clinicos-l2v-sla-tick.json passes structural and
   assert.strictEqual(slaWf.nodes.length, 4);
 });
 
-addTest('L2V SLA Tick Workflow Validator Mutations: rejects 10 distinct invalid mutations in memory', 'Lead-to-Visit', () => {
+addTest('L2V SLA Tick Workflow Validator Mutations: rejects 11 distinct invalid mutations in memory', 'Lead-to-Visit', () => {
   const path = require('path');
   const { validateStructure, runSlaTickMutationTests } = require('./validate_workflow.js');
   const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
   const slaWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-l2v-sla-tick.json'));
   const count = runSlaTickMutationTests(origWf, slaWf);
-  assert.strictEqual(count, 10);
+  assert.strictEqual(count, 11);
 });
 
 addTest('L2V Parse AI Output: faq with explicit service preserves service_name_ar while generic faq/injection keeps it null', 'Lead-to-Visit', () => {
@@ -2598,6 +2598,15 @@ addTest('T10 Dashboard API Validator Mutations: rejects all 8 workflow security/
   const dashWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-dashboard-api.json'));
   validateDashboardApiContract(origWf, dashWf);
   assert.strictEqual(runDashboardApiMutationTests(origWf, dashWf), 8);
+});
+
+addTest('T11 SLA Tick Validator Mutations: enforces release_overnight() + escalate_overdue() query and all 11 SLA Tick mutations', 'Lead-to-Visit', () => {
+  const path = require('path');
+  const { validateStructure, validateSlaTickContract, runSlaTickMutationTests } = require('./validate_workflow.js');
+  const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
+  const slaWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-l2v-sla-tick.json'));
+  validateSlaTickContract(origWf, slaWf);
+  assert.strictEqual(runSlaTickMutationTests(origWf, slaWf), 11);
 });
 
 addTest('T10 Dashboard UI: shows DEMO DATA banner when unconfigured or on API failure, and renders escaped live data when API succeeds', 'Lead-to-Visit', () => {

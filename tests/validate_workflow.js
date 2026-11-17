@@ -453,10 +453,11 @@ function validateSlaTickContract(origWf, slaWf) {
   assert.strictEqual(escalateNode.type, 'n8n-nodes-base.postgres', 'Escalate node must be a Postgres node');
   assert.strictEqual(escalateNode.typeVersion, 2.8, 'Escalate Postgres node typeVersion must be 2.8');
   assert.strictEqual(escalateNode.parameters?.operation, 'executeQuery', 'Escalate Postgres node must use executeQuery');
+  const expectedSlaQuery = 'SELECT l2v.release_overnight() AS released, l2v.escalate_overdue() AS escalated;';
   assert.strictEqual(
     String(escalateNode.parameters?.query ?? '').replace(/\r\n/g, '\n').trim(),
-    'SELECT l2v.escalate_overdue() AS escalated;',
-    `Escalate Postgres node query must be "SELECT l2v.escalate_overdue() AS escalated;", got ${JSON.stringify(escalateNode.parameters?.query)}`
+    expectedSlaQuery,
+    `Escalate Postgres node query must be "${expectedSlaQuery}", got ${JSON.stringify(escalateNode.parameters?.query)}`
   );
   assert.strictEqual(
     escalateNode.parameters?.options?.queryBatching,
@@ -566,7 +567,7 @@ function runSlaTickMutationTests(origWf, slaWf) {
       esc.parameters.query = 'SELECT l2v.escalate_overdue();';
       validateSlaTickContract(origWf, m);
     },
-    /Escalate Postgres node query must be "SELECT l2v\.escalate_overdue\(\) AS escalated;"/,
+    /Escalate Postgres node query must be "SELECT l2v\.release_overnight\(\) AS released, l2v\.escalate_overdue\(\) AS escalated;"/,
     'Mutation 4 (wrong SQL query on escalate Postgres node) must be rejected'
   );
 
@@ -661,7 +662,19 @@ function runSlaTickMutationTests(origWf, slaWf) {
     'Mutation 10 (wrong credentials.postgres.name) must be rejected'
   );
 
-  return 10;
+  // Mutation 11 (T11): legacy SLA Tick query omitting l2v.release_overnight()
+  assert.throws(
+    () => {
+      const m = clone();
+      const esc = m.nodes.find((n) => n.name === 'Escalate Overdue Leads');
+      esc.parameters.query = 'SELECT l2v.escalate_overdue() AS escalated;';
+      validateSlaTickContract(origWf, m);
+    },
+    /Escalate Postgres node query must be "SELECT l2v\.release_overnight\(\) AS released, l2v\.escalate_overdue\(\) AS escalated;"/,
+    'Mutation 11 (omitting l2v.release_overnight() from SLA Tick query) must be rejected'
+  );
+
+  return 11;
 }
 
 function runMainWorkflowAuditMutationTests(wf) {
