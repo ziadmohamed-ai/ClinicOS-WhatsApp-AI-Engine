@@ -6,10 +6,11 @@
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'anon')               then create role anon nologin; end if;
   if not exists (select 1 from pg_roles where rolname = 'authenticated')      then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role')       then create role service_role nologin; end if;
   if not exists (select 1 from pg_roles where rolname = 'clinicos_api_owner') then create role clinicos_api_owner nologin; end if;
 end $$;
 
-create schema private;
+create schema if not exists private;
 \i :repo/database/01_schema.sql
 \i :fns
 \i :repo/database/05_lead_engine.sql

@@ -10,8 +10,9 @@ Run these from the repository root. Run every step that exists in this checkout;
 1. `node tests/test_270_messages.js` — expect `N/N PASSED (0 FAILED)`. The total only ever grows.
 2. If `tests/validate_workflow.js` exists: `node tests/validate_workflow.js workflow/clinicos-main-engine.json workflow/clinicos-main-engine.l2v.json` — both lines must say `Workflow valid`.
 3. `./tests/l2v/run_local.sh` — must end with `L2V SQL tests: OK`. (Scratch Postgres cluster; never a real database.)
+3b. `./tests/clean_install_test.sh` — must end with `Clean install test: OK`. (Empty scratch Postgres cluster running `database/01..05b` in order with `ON_ERROR_STOP` and default `check_function_bodies`, plus `pg_proc` drift check against workflow Postgres queries.)
 4. If `scripts/build_l2v_workflow.js` exists: run it, then `git status --short workflow/`. **No uncommitted change may appear.** If one does, the generated workflow files were stale: commit them.
-5. `git diff --stat origin/l2v-addon...HEAD` — every changed file must belong to the current task. List anything unexpected and justify it or revert it.
+5. `git diff --stat <base-branch>...HEAD` — every changed file must belong to the current task. List anything unexpected and justify it or revert it.
 
 Report in this shape (paste real output, never a summary from memory):
 
@@ -20,6 +21,7 @@ Test output
   JS suite:   <summary line>
   Validator:  <lines>
   SQL:        <last NOTICE lines + final line>
+  Clean install: <final lines>
   Generated files in sync: yes/no
 Files changed: <list>
 ```

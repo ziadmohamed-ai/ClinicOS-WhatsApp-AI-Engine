@@ -60,33 +60,6 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
--- private.claim_outbox_batch_with_route(p_batch_size integer, p_clinic_id uuid)
--- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION private.claim_outbox_batch_with_route(p_batch_size integer DEFAULT 10, p_clinic_id uuid DEFAULT NULL::uuid)
- RETURNS TABLE(outbox_id uuid, clinic_id uuid, contact_id uuid, recipient_phone text, message_kind text, payload jsonb, attempt_count integer, max_attempts integer, claim_token uuid, claimed_at timestamp with time zone, phone_number_id text)
- LANGUAGE sql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-  SELECT
-    claimed.outbox_id,
-    claimed.clinic_id,
-    claimed.contact_id,
-    claimed.recipient_phone,
-    claimed.message_kind,
-    claimed.payload,
-    claimed.attempt_count,
-    claimed.max_attempts,
-    claimed.claim_token,
-    claimed.claimed_at,
-    NULLIF(pg_catalog.btrim(clinic.settings->>'whatsapp_phone_number_id'), '') AS phone_number_id
-  FROM public.claim_outbox_batch(p_batch_size, p_clinic_id) AS claimed
-  LEFT JOIN public.clinics AS clinic
-    ON clinic.id = claimed.clinic_id
-  ORDER BY claimed.claimed_at, claimed.outbox_id;
-$function$;
-
--- ---------------------------------------------------------------------
 -- private.get_clinicos_meta_secret(p_secret_name text)
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION private.get_clinicos_meta_secret(p_secret_name text)
@@ -1540,6 +1513,33 @@ BEGIN
     WHERE changed.status = 'processing'
     ORDER BY changed.locked_at, changed.id;
 END;
+$function$;
+
+-- ---------------------------------------------------------------------
+-- private.claim_outbox_batch_with_route(p_batch_size integer, p_clinic_id uuid)
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION private.claim_outbox_batch_with_route(p_batch_size integer DEFAULT 10, p_clinic_id uuid DEFAULT NULL::uuid)
+ RETURNS TABLE(outbox_id uuid, clinic_id uuid, contact_id uuid, recipient_phone text, message_kind text, payload jsonb, attempt_count integer, max_attempts integer, claim_token uuid, claimed_at timestamp with time zone, phone_number_id text)
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'public'
+AS $function$
+  SELECT
+    claimed.outbox_id,
+    claimed.clinic_id,
+    claimed.contact_id,
+    claimed.recipient_phone,
+    claimed.message_kind,
+    claimed.payload,
+    claimed.attempt_count,
+    claimed.max_attempts,
+    claimed.claim_token,
+    claimed.claimed_at,
+    NULLIF(pg_catalog.btrim(clinic.settings->>'whatsapp_phone_number_id'), '') AS phone_number_id
+  FROM public.claim_outbox_batch(p_batch_size, p_clinic_id) AS claimed
+  LEFT JOIN public.clinics AS clinic
+    ON clinic.id = claimed.clinic_id
+  ORDER BY claimed.claimed_at, claimed.outbox_id;
 $function$;
 
 -- ---------------------------------------------------------------------
