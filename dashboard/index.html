@@ -3,9 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ClinicOS — لوحة تحكم العيادة ومحاكي واتساب التفاعلي</title>
-  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <title>ClinicOS — لوحة تحكم العيادة ومحاكي واتساب التفاعلي (Static Mock)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
+    :root {
+      --background: #f8fafc;
+      --foreground: #0f172a;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --muted-foreground: #64748b;
+      --secondary: #f1f5f9;
+      --secondary-foreground: #1e293b;
+    }
     @keyframes pulseGlow {
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.65; transform: scale(0.98); }
@@ -33,9 +42,9 @@
       <div>
         <div class="flex items-center gap-2">
           <h1 class="font-bold text-base text-[var(--foreground)]">نظام ClinicOS الذكي — عيادة ديمو التخصصية</h1>
-          <span class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/15 text-emerald-600 font-medium border border-emerald-500/30">وضع المحاكاة التفاعلي (Demo Simulator)</span>
+          <span class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/15 text-emerald-600 font-medium border border-emerald-500/30">نموذج عرض ثابت (Static Mock — Demo Simulator)</span>
         </div>
-        <p class="text-xs text-[var(--muted-foreground)]">شاشة العرض التفاعلية لتصوير الفيديو (الداشبورد + محاكي واتساب العميل وموظف الاستقبال)</p>
+        <p class="text-xs text-[var(--muted-foreground)]">نموذج محاكاة ثابت ببيانات تجريبية محلية (Static Mock — غير متصل ببيانات حية حالياً) لعرض الداشبورد ومحاكي واتساب العميل وموظف الاستقبال</p>
       </div>
     </div>
 
@@ -79,7 +88,7 @@
             <span>🤖</span>
           </div>
           <div id="kpiBotStatus" class="text-base font-bold text-emerald-600 mt-1">نشط (يرد تلقائياً)</div>
-          <div id="kpiBotSub" class="text-xs text-[var(--muted-foreground)] mt-1">GPT-4.1 Mini + SQL</div>
+          <div id="kpiBotSub" class="text-xs text-[var(--muted-foreground)] mt-1">GPT-4.1 + SQL</div>
         </div>
 
         <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3.5 shadow-sm">
@@ -173,7 +182,7 @@
         <div class="flex items-center justify-between mb-2.5">
           <div class="flex items-center gap-2">
             <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
-            <h2 class="font-bold text-sm text-[var(--foreground)]">⚙️ مسار التنفيذ اللحظي (ClinicOS - Main Engine — 23 Nodes)</h2>
+            <h2 class="font-bold text-sm text-[var(--foreground)]">⚙️ مسار التنفيذ اللحظي (ClinicOS - Main Engine — 30 core / 36 L2V nodes)</h2>
           </div>
           <span id="lastExecBadge" class="text-xs text-[var(--muted-foreground)]">جاهز للاستقبال</span>
         </div>
@@ -394,6 +403,15 @@
       box.scrollTop = box.scrollHeight;
     }
 
+    function escapeHtml(val) {
+      return String(val ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function renderDashboard() {
       document.getElementById('kpiBookings').textContent = String(state.appointments.length);
       document.getElementById('kpiLifecycle').textContent = String(state.lifecycleCount);
@@ -408,7 +426,7 @@
       } else {
         botStatus.textContent = 'نشط (يرد تلقائياً)';
         botStatus.className = 'text-base font-bold text-emerald-600 mt-1';
-        botSub.textContent = 'GPT-4.1 Mini + SQL';
+        botSub.textContent = 'GPT-4.1 + SQL';
       }
 
       const pendingBadge = document.getElementById('pendingBadge');
@@ -431,10 +449,10 @@
 
       tbody.innerHTML = state.appointments.map(appt => `
         <tr class="msg-enter bg-emerald-500/5">
-          <td class="py-3 px-3 font-bold">${appt.patient}</td>
-          <td class="py-3 px-3">${appt.service}</td>
-          <td class="py-3 px-3">${appt.doctor}</td>
-          <td class="py-3 px-3 font-mono">${appt.date} (${appt.time})</td>
+          <td class="py-3 px-3 font-bold">${escapeHtml(appt.patient)}</td>
+          <td class="py-3 px-3">${escapeHtml(appt.service)}</td>
+          <td class="py-3 px-3">${escapeHtml(appt.doctor)}</td>
+          <td class="py-3 px-3 font-mono">${escapeHtml(appt.date)} (${escapeHtml(appt.time)})</td>
           <td class="py-3 px-3">
             ${appt.reminderSent
               ? '<span class="px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-600 font-semibold">تم الإرسال ✅</span>'
@@ -569,7 +587,7 @@
 
       // Medical / Human handoff detection
       if (text.includes('ألم') || text.includes('الم') || text.includes('ضرسي') || text.includes('موظف') || text.includes('دكتور')) {
-        logEngine('stage-ai', 'AI Receptionist (GPT-4.1-mini): تصنيف الرسالة intent="human_handoff" (needs_human=true).', 'Execution #126');
+        logEngine('stage-ai', 'AI Receptionist (GPT-4.1): تصنيف الرسالة intent="human_handoff" (needs_human=true).', 'Execution #126');
         await sleep(450);
         logEngine('stage-outbox', 'Save State & Enqueue: تحويل المحادثة لـ human + إرسال تنبيه واتساب لموظف الاستقبال (+966509998877).', 'Execution #126 (Success ✓)');
 
