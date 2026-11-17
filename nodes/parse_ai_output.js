@@ -567,6 +567,8 @@ function plainReply(text) {
       target_status: null,
       state_patch: null,
       patient_profile_patch: baseProfilePatch,
+      lead_timing: null,
+      lead_budget_band: null,
       reply_text: text,
     },
   };
@@ -632,6 +634,8 @@ if (intent === "cancel_request" && upcomingById.size === 0) {
         target_status: null,
         state_patch: { pending_booking: null },
         patient_profile_patch: baseProfilePatch,
+        lead_timing: null,
+        lead_budget_band: null,
         reply_text: aiWording({ allowCancelClaim: true, allowQuestionless: true, require: /(حجز|ميعاد|موعد|طلب|booking|request|appointment)/i }) ?? (language === "en"
           ? "No problem at all, I've cancelled the pending booking request. Let me know whenever you'd like to book in the future!"
           : dialect === "ar-SA"
@@ -987,6 +991,8 @@ if (
       target_status: null,
       state_patch: { pending_booking: clearedSelectedPending },
       patient_profile_patch: profilePatch,
+      lead_timing: null,
+      lead_budget_band: null,
       reply_text: aiWording({}) ??
         (language === "en"
           ? "No problem at all! Which other time or slot from the list would you prefer?"
@@ -1037,6 +1043,8 @@ if (
       target_status: null,
       state_patch: null,
       patient_profile_patch: profilePatch,
+      lead_timing: null,
+      lead_budget_band: null,
       reply_text: aiReply,
     },
   };
@@ -1135,6 +1143,8 @@ if (
       target_status: null,
       state_patch: { pending_booking: updatedPending },
       patient_profile_patch: profilePatch,
+      lead_timing: null,
+      lead_budget_band: null,
       reply_text: replyText,
     },
   };
@@ -1228,6 +1238,16 @@ if (intent === "faq" && pending && pendingSlots.length > 0 && !/(حجز|ميعا
   }
 }
 
+const ALLOWED_LEAD_TIMINGS = new Set(["now", "this_month", "later"]);
+const ALLOWED_LEAD_BUDGET_BANDS = new Set(["high", "mid", "low"]);
+function parseLeadEnum(val, allowedSet) {
+  if (typeof val !== "string") return null;
+  const norm = val.trim().toLowerCase();
+  return allowedSet.has(norm) ? norm : null;
+}
+const leadTiming = isPromptInjection ? null : parseLeadEnum(parsed.lead_timing, ALLOWED_LEAD_TIMINGS);
+const leadBudgetBand = isPromptInjection ? null : parseLeadEnum(parsed.lead_budget_band, ALLOWED_LEAD_BUDGET_BANDS);
+
 return {
   json: {
     ...event,
@@ -1254,6 +1274,8 @@ return {
     target_status: needsHuman ? "human" : null,
     state_patch: (needsHuman || isCancelRequest) ? { pending_booking: null } : null,
     patient_profile_patch: profilePatch,
+    lead_timing: leadTiming,
+    lead_budget_band: leadBudgetBand,
     reply_text: finalReply,
   },
 };
