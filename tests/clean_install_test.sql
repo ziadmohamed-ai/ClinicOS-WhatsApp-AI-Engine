@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS vault.decrypted_secrets (
 \i :repo/database/01_schema.sql
 \i :repo/database/02_booking_and_outbox_rpcs.sql
 \i :step_02a
-\i :repo/database/03_rls_policies.sql
+\i :rls_sql
 
 -- T9: Before any clinic row exists (0 clinics), log_workflow_error must raise a clear error (never fall back to a fixed UUID)
 DO $$
