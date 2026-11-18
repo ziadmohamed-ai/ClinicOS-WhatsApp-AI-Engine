@@ -60,33 +60,6 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
--- private.claim_outbox_batch_with_route(p_batch_size integer, p_clinic_id uuid)
--- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION private.claim_outbox_batch_with_route(p_batch_size integer DEFAULT 10, p_clinic_id uuid DEFAULT NULL::uuid)
- RETURNS TABLE(outbox_id uuid, clinic_id uuid, contact_id uuid, recipient_phone text, message_kind text, payload jsonb, attempt_count integer, max_attempts integer, claim_token uuid, claimed_at timestamp with time zone, phone_number_id text)
- LANGUAGE sql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-  SELECT
-    claimed.outbox_id,
-    claimed.clinic_id,
-    claimed.contact_id,
-    claimed.recipient_phone,
-    claimed.message_kind,
-    claimed.payload,
-    claimed.attempt_count,
-    claimed.max_attempts,
-    claimed.claim_token,
-    claimed.claimed_at,
-    NULLIF(pg_catalog.btrim(clinic.settings->>'whatsapp_phone_number_id'), '') AS phone_number_id
-  FROM public.claim_outbox_batch(p_batch_size, p_clinic_id) AS claimed
-  LEFT JOIN public.clinics AS clinic
-    ON clinic.id = claimed.clinic_id
-  ORDER BY claimed.claimed_at, claimed.outbox_id;
-$function$;
-
--- ---------------------------------------------------------------------
 -- private.get_clinicos_meta_secret(p_secret_name text)
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION private.get_clinicos_meta_secret(p_secret_name text)
@@ -1543,6 +1516,33 @@ END;
 $function$;
 
 -- ---------------------------------------------------------------------
+-- private.claim_outbox_batch_with_route(p_batch_size integer, p_clinic_id uuid)
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION private.claim_outbox_batch_with_route(p_batch_size integer DEFAULT 10, p_clinic_id uuid DEFAULT NULL::uuid)
+ RETURNS TABLE(outbox_id uuid, clinic_id uuid, contact_id uuid, recipient_phone text, message_kind text, payload jsonb, attempt_count integer, max_attempts integer, claim_token uuid, claimed_at timestamp with time zone, phone_number_id text)
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'public'
+AS $function$
+  SELECT
+    claimed.outbox_id,
+    claimed.clinic_id,
+    claimed.contact_id,
+    claimed.recipient_phone,
+    claimed.message_kind,
+    claimed.payload,
+    claimed.attempt_count,
+    claimed.max_attempts,
+    claimed.claim_token,
+    claimed.claimed_at,
+    NULLIF(pg_catalog.btrim(clinic.settings->>'whatsapp_phone_number_id'), '') AS phone_number_id
+  FROM public.claim_outbox_batch(p_batch_size, p_clinic_id) AS claimed
+  LEFT JOIN public.clinics AS clinic
+    ON clinic.id = claimed.clinic_id
+  ORDER BY claimed.claimed_at, claimed.outbox_id;
+$function$;
+
+-- ---------------------------------------------------------------------
 -- public.classify_whatsapp_opt_out_scope(p_body text)
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.classify_whatsapp_opt_out_scope(p_body text)
@@ -2380,6 +2380,7 @@ CREATE OR REPLACE FUNCTION public.log_workflow_error(p_workflow_name text, p_exe
 AS $function$
 DECLARE
   v_clinic_id uuid;
+  v_clinic_count integer;
   v_event_id bigint;
   v_exec_id text := nullif(left(btrim(coalesce(p_execution_id, '')), 64), '');
   v_node text := coalesce(nullif(left(btrim(coalesce(p_last_node, '')), 120), ''), 'unknown');
@@ -2392,9 +2393,12 @@ BEGIN
     RETURN jsonb_build_object('ok', false, 'reason', 'invalid_request');
   END IF;
 
-  SELECT id INTO v_clinic_id FROM public.clinics LIMIT 1;
-  IF v_clinic_id IS NULL THEN
-    v_clinic_id := '5b201616-fdf0-4a37-8863-bd050ea90376'::uuid;
+  SELECT count(*)::int, (array_agg(id))[1]
+    INTO v_clinic_count, v_clinic_id
+    FROM public.clinics;
+
+  IF v_clinic_count <> 1 THEN
+    RAISE EXCEPTION 'log_workflow_error requires exactly 1 clinic row in public.clinics (found %)', v_clinic_count;
   END IF;
 
   INSERT INTO public.system_events (

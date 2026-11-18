@@ -28,8 +28,15 @@ create table l2v.settings (
   clinic_id          uuid primary key references public.clinics (id) on delete cascade,
   sla_minutes        integer not null default 15 check (sla_minutes between 1 and 240),
   manager_contact_id uuid references public.contacts (id) on delete set null,
-  created_at         timestamptz not null default now()
+  open_time          time,
+  close_time         time,
+  open_days          smallint[] check (open_days is null or open_days <@ array[0,1,2,3,4,5,6]::smallint[]),
+  created_at         timestamptz not null default now(),
+  constraint settings_hours_not_equal check (open_time is null or close_time is null or open_time <> close_time)
 );
+alter table l2v.settings add column if not exists open_time time;
+alter table l2v.settings add column if not exists close_time time;
+alter table l2v.settings add column if not exists open_days smallint[];
 create index settings_manager_idx on l2v.settings (manager_contact_id);
 
 create table l2v.reps (
@@ -286,9 +293,74 @@ begin
 end;
 $$;
 
--- Round-robin: the active rep assigned least recently gets the lead.
--- Returns the assignment id, or null when no eligible rep is left.
-create function l2v.assign_lead(p_lead_id uuid, p_exclude_rep_ids uuid[] default '{}')
+-- Is the clinic currently within configured l2v.settings working hours?
+-- Default NULL (no l2v.settings row, or open_time/close_time/open_days all NULL) = always open.
+create function l2v.is_clinic_open(p_clinic_id uuid, p_at timestamptz default null)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_tz         text := 'Africa/Cairo';
+  v_open_time  time;
+  v_close_time time;
+  v_open_days  smallint[];
+  v_now        timestamptz;
+  v_local_ts   timestamp;
+  v_local_dow  smallint;
+  v_local_time time;
+begin
+  if p_clinic_id is null then
+    return true;
+  end if;
+
+  select coalesce(nullif(c.timezone, ''), 'Africa/Cairo')
+    into v_tz
+    from public.clinics c
+   where c.id = p_clinic_id;
+
+  select s.open_time, s.close_time, s.open_days
+    into v_open_time, v_close_time, v_open_days
+    from l2v.settings s
+   where s.clinic_id = p_clinic_id;
+
+  if not found or (v_open_time is null and v_close_time is null and v_open_days is null) then
+    return true;
+  end if;
+
+  v_now        := coalesce(p_at, nullif(btrim(coalesce(current_setting('l2v.test_now', true), '')), '')::timestamptz, now());
+  v_local_ts   := v_now at time zone v_tz;
+  v_local_dow  := extract(dow from v_local_ts)::smallint;
+  v_local_time := v_local_ts::time;
+
+  if v_open_days is not null and not (v_local_dow = any (v_open_days)) then
+    return false;
+  end if;
+
+  if v_open_time is not null and v_close_time is not null then
+    if v_open_time < v_close_time then
+      return v_local_time >= v_open_time and v_local_time < v_close_time;
+    else
+      return v_local_time >= v_open_time or v_local_time < v_close_time;
+    end if;
+  elsif v_open_time is not null then
+    return v_local_time >= v_open_time;
+  elsif v_close_time is not null then
+    return v_local_time < v_close_time;
+  end if;
+
+  return true;
+end;
+$$;
+
+-- Internal assignment helper allowing an explicit SLA start timestamp (e.g. opening time).
+create function l2v._assign_lead_at(
+  p_lead_id         uuid,
+  p_exclude_rep_ids uuid[] default '{}',
+  p_sla_start_at    timestamptz default null
+)
 returns uuid
 language plpgsql
 security definer
@@ -300,6 +372,8 @@ declare
   v_sla     integer;
   v_rep     l2v.reps%rowtype;
   v_attempt smallint;
+  v_now     timestamptz;
+  v_base_ts timestamptz;
   v_id      uuid;
 begin
   select * into v_lead from l2v.leads where id = p_lead_id for update;
@@ -334,11 +408,14 @@ begin
   select coalesce(max(a.attempt), 0) + 1 into v_attempt
     from l2v.assignments a where a.lead_id = p_lead_id;
 
-  insert into l2v.assignments (lead_id, rep_id, attempt, sla_due_at)
-  values (p_lead_id, v_rep.id, v_attempt, now() + make_interval(mins => v_sla))
+  v_now     := coalesce(nullif(btrim(coalesce(current_setting('l2v.test_now', true), '')), '')::timestamptz, now());
+  v_base_ts := coalesce(p_sla_start_at, v_now);
+
+  insert into l2v.assignments (lead_id, rep_id, attempt, assigned_at, sla_due_at)
+  values (p_lead_id, v_rep.id, v_attempt, v_now, v_base_ts + make_interval(mins => v_sla))
   returning id into v_id;
 
-  update l2v.reps set last_assigned_at = now() where id = v_rep.id;
+  update l2v.reps set last_assigned_at = v_now where id = v_rep.id;
 
   perform l2v._notify(
     v_lead.clinic_id, v_rep.contact_id, 'lead_handoff',
@@ -353,7 +430,19 @@ begin
 end;
 $$;
 
--- Deterministic scoring. Hot (>= 70) leads are assigned to a rep immediately.
+-- Round-robin: the active rep assigned least recently gets the lead.
+-- Returns the assignment id, or null when no eligible rep is left.
+create function l2v.assign_lead(p_lead_id uuid, p_exclude_rep_ids uuid[] default '{}')
+returns uuid
+language sql
+security definer
+set search_path = ''
+as $$
+  select l2v._assign_lead_at(p_lead_id, p_exclude_rep_ids, null);
+$$;
+
+-- Deterministic scoring. Hot (>= 70) leads are assigned immediately when the clinic is open;
+-- when closed, a new hot lead stays hot and unassigned until l2v.release_overnight() runs.
 -- score = timing points + budget points; hot >= 70, warm 30..69, cold < 30.
 create function l2v.set_qualification(
   p_lead_id     uuid,
@@ -367,9 +456,10 @@ security definer
 set search_path = ''
 as $$
 declare
-  v_score  integer;
-  v_status text;
-  v_assign uuid;
+  v_score     integer;
+  v_status    text;
+  v_clinic_id uuid;
+  v_assign    uuid;
 begin
   v_score :=
     case p_timing when 'now' then 60 when 'this_month' then 35 when 'later' then 10 else 0 end
@@ -383,7 +473,8 @@ begin
          score = v_score,
          status = case when l.status = 'closed' then l.status else v_status end,
          treatment_interest = coalesce(p_treatment, l.treatment_interest)
-   where l.id = p_lead_id;
+   where l.id = p_lead_id
+   returning l.clinic_id into v_clinic_id;
 
   if not found then
     raise exception 'lead % not found', p_lead_id;
@@ -391,7 +482,11 @@ begin
 
   if v_status = 'hot' then
     if not exists (select 1 from l2v.assignments a where a.lead_id = p_lead_id) then
-      v_assign := l2v.assign_lead(p_lead_id);
+      if l2v.is_clinic_open(v_clinic_id) then
+        v_assign := l2v.assign_lead(p_lead_id);
+      else
+        v_assign := null;
+      end if;
     else
       select a.id into v_assign
         from l2v.assignments a
@@ -519,9 +614,111 @@ begin
 end;
 $$;
 
+-- Once the clinic is open, moves any pending assignments whose sla_due_at passed
+-- while the clinic was closed to opening_time + sla_minutes (once, idempotent),
+-- and assigns all unassigned hot leads in round-robin order with SLA starting at
+-- the clinic's opening time (idempotent; skips closed clinics and leads whose patient already booked).
+create function l2v.release_overnight()
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  r          record;
+  v_now      timestamptz;
+  v_tz       text;
+  v_open_t   time;
+  v_close_t  time;
+  v_local_ts timestamp;
+  v_open_at  timestamptz;
+  v_new      uuid;
+  v_count    integer := 0;
+begin
+  v_now := coalesce(nullif(btrim(coalesce(current_setting('l2v.test_now', true), '')), '')::timestamptz, now());
+
+  -- Move pending assignments whose sla_due_at passed while the clinic was closed
+  -- to opening_time + sla_minutes (once per open window, idempotent).
+  update l2v.assignments a
+     set sla_due_at = w.open_at + make_interval(mins => cfg.sla_minutes)
+    from l2v.leads l
+    join public.clinics c on c.id = l.clinic_id
+    join l2v.settings s   on s.clinic_id = l.clinic_id
+    cross join lateral (
+      select coalesce(nullif(c.timezone, ''), 'Africa/Cairo') as tz,
+             coalesce(s.open_time, time '00:00:00') as open_t,
+             s.close_time as close_t,
+             coalesce(s.sla_minutes, 15) as sla_minutes
+    ) cfg
+    cross join lateral (
+      select (v_now at time zone cfg.tz) as local_ts
+    ) lt
+    cross join lateral (
+      select case
+               when cfg.close_t is not null
+                and cfg.open_t > cfg.close_t
+                and lt.local_ts::time < cfg.close_t
+               then ((lt.local_ts::date - 1) + cfg.open_t) at time zone cfg.tz
+               else (lt.local_ts::date + cfg.open_t) at time zone cfg.tz
+             end as open_at
+    ) w
+   where a.lead_id = l.id
+     and a.status = 'pending'
+     and (s.open_time is not null or s.close_time is not null or s.open_days is not null)
+     and l2v.is_clinic_open(l.clinic_id, v_now)
+     and a.sla_due_at < w.open_at
+     and not l2v.is_clinic_open(l.clinic_id, a.sla_due_at);
+
+  for r in
+    select l.id as lead_id, l.clinic_id, l.created_at
+      from l2v.leads l
+     where l.status = 'hot'
+       and l2v.is_clinic_open(l.clinic_id, v_now)
+       and not exists (
+         select 1 from l2v.assignments a where a.lead_id = l.id
+       )
+       and not exists (
+         select 1 from public.appointments ap
+          where ap.clinic_id = l.clinic_id
+            and ap.contact_id = l.contact_id
+            and ap.created_at >= l.created_at
+            and ap.status in ('confirmed', 'completed')
+       )
+     order by l.created_at, l.id
+       for update of l skip locked
+     limit 50
+  loop
+    select coalesce(nullif(c.timezone, ''), 'Africa/Cairo'), s.open_time, s.close_time
+      into v_tz, v_open_t, v_close_t
+      from public.clinics c
+      left join l2v.settings s on s.clinic_id = c.id
+     where c.id = r.clinic_id;
+
+    if v_open_t is not null then
+      v_local_ts := v_now at time zone v_tz;
+      if v_close_t is not null and v_open_t > v_close_t and v_local_ts::time < v_close_t then
+        v_open_at := ((v_local_ts::date - 1) + v_open_t) at time zone v_tz;
+      else
+        v_open_at := (v_local_ts::date + v_open_t) at time zone v_tz;
+      end if;
+    else
+      v_open_at := v_now;
+    end if;
+
+    v_new := l2v._assign_lead_at(r.lead_id, '{}'::uuid[], greatest(v_open_at, r.created_at));
+    if v_new is not null then
+      v_count := v_count + 1;
+    end if;
+  end loop;
+
+  return v_count;
+end;
+$$;
+
 -- Run every minute from n8n. Closes assignments whose patient already booked,
--- then moves overdue ones to the next rep and alerts the manager.
--- Returns the number of escalated assignments.
+-- ensures pending assignments whose sla_due_at passed while closed are moved to
+-- opening_time + sla_minutes, then (while the clinic is open) moves overdue ones
+-- to the next rep and alerts the manager. Returns the number of escalated assignments.
 create function l2v.escalate_overdue()
 returns integer
 language plpgsql
@@ -530,10 +727,13 @@ set search_path = ''
 as $$
 declare
   r         record;
+  v_now     timestamptz;
   v_new     uuid;
   v_to_name text;
   v_count   integer := 0;
 begin
+  v_now := coalesce(nullif(btrim(coalesce(current_setting('l2v.test_now', true), '')), '')::timestamptz, now());
+
   -- the AI receptionist already booked this patient: no rep action needed
   update l2v.assignments a
      set status = 'closed_booked'
@@ -548,6 +748,38 @@ begin
           and ap.status in ('confirmed', 'completed')
      );
 
+  -- Idempotent guard: if escalate_overdue runs before release_overnight at opening time,
+  -- move pending assignments whose sla_due_at passed while the clinic was closed to opening_time + sla_minutes.
+  update l2v.assignments a
+     set sla_due_at = w.open_at + make_interval(mins => cfg.sla_minutes)
+    from l2v.leads l
+    join public.clinics c on c.id = l.clinic_id
+    join l2v.settings s   on s.clinic_id = l.clinic_id
+    cross join lateral (
+      select coalesce(nullif(c.timezone, ''), 'Africa/Cairo') as tz,
+             coalesce(s.open_time, time '00:00:00') as open_t,
+             s.close_time as close_t,
+             coalesce(s.sla_minutes, 15) as sla_minutes
+    ) cfg
+    cross join lateral (
+      select (v_now at time zone cfg.tz) as local_ts
+    ) lt
+    cross join lateral (
+      select case
+               when cfg.close_t is not null
+                and cfg.open_t > cfg.close_t
+                and lt.local_ts::time < cfg.close_t
+               then ((lt.local_ts::date - 1) + cfg.open_t) at time zone cfg.tz
+               else (lt.local_ts::date + cfg.open_t) at time zone cfg.tz
+             end as open_at
+    ) w
+   where a.lead_id = l.id
+     and a.status = 'pending'
+     and (s.open_time is not null or s.close_time is not null or s.open_days is not null)
+     and l2v.is_clinic_open(l.clinic_id, v_now)
+     and a.sla_due_at < w.open_at
+     and not l2v.is_clinic_open(l.clinic_id, a.sla_due_at);
+
   for r in
     select a.id, a.lead_id, a.rep_id,
            l.clinic_id, l.treatment_interest,
@@ -561,12 +793,13 @@ begin
       join l2v.reps rp      on rp.id = a.rep_id
       left join l2v.settings s on s.clinic_id = l.clinic_id
      where a.status = 'pending'
-       and a.sla_due_at <= now()
+       and a.sla_due_at <= v_now
+       and l2v.is_clinic_open(l.clinic_id, v_now)
      order by a.sla_due_at
        for update of a skip locked
      limit 50
   loop
-    update l2v.assignments set status = 'escalated', escalated_at = now() where id = r.id;
+    update l2v.assignments set status = 'escalated', escalated_at = v_now where id = r.id;
 
     v_new := l2v.assign_lead(
       r.lead_id,
@@ -623,7 +856,9 @@ returns table (
   escalations       integer,
   booked_leads      integer,
   visits            integer,
-  no_shows          integer
+  no_shows          integer,
+  leads_ads         integer,
+  leads_organic     integer
 )
 language sql
 stable
@@ -646,7 +881,9 @@ as $$
               where ap.clinic_id = l.clinic_id
                 and ap.contact_id = l.contact_id
                 and ap.created_at >= l.created_at
-                and ap.status in ('confirmed', 'completed')))::integer as booked_leads
+                and ap.status in ('confirmed', 'completed')))::integer as booked_leads,
+           count(*) filter (where l.source <> 'organic')::integer as leads_ads,
+           count(*) filter (where l.source = 'organic')::integer as leads_organic
       from l2v.leads l
       cross join tz
       left join lateral (
@@ -699,12 +936,67 @@ as $$
          coalesce(e.escalations, 0),
          coalesce(ls.booked_leads, 0),
          coalesce(ap.visits, 0),
-         coalesce(ap.no_shows, 0)
+         coalesce(ap.no_shows, 0),
+         coalesce(ls.leads_ads, 0),
+         coalesce(ls.leads_organic, 0)
     from days d
     left join lead_stats ls on ls.day = d.day
     left join esc e         on e.day = d.day
     left join appt ap       on ap.day = d.day
    order by d.day;
+$$;
+
+-- Latest leads for the clinic dashboard (max 50), with phone numbers masked
+-- so all digits except the last 3 digits are replaced with '*'.
+create function l2v.recent_leads(p_clinic_id uuid, p_limit integer default 50)
+returns table (
+  lead_id            uuid,
+  phone_masked       text,
+  status             text,
+  source             text,
+  score              smallint,
+  campaign           text,
+  treatment_interest text,
+  created_at         timestamptz
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  with lim as (
+    select least(greatest(coalesce(p_limit, 50), 1), 50) as n
+  ),
+  raw_leads as (
+    select l.id as lead_id,
+           pg_catalog.regexp_replace(coalesce(c.phone_e164, ''), '[^0-9]', '', 'g') as digits,
+           l.status,
+           l.source,
+           l.score,
+           l.campaign,
+           l.treatment_interest,
+           l.created_at
+      from l2v.leads l
+      join public.contacts c
+        on c.id = l.contact_id
+       and c.clinic_id = l.clinic_id
+     where p_clinic_id is not null
+       and l.clinic_id = p_clinic_id
+     order by l.created_at desc, l.id desc
+     limit (select n from lim)
+  )
+  select r.lead_id,
+         case
+           when length(r.digits) <= 3 then '***'
+           else '+' || repeat('*', length(r.digits) - 3) || right(r.digits, 3)
+         end as phone_masked,
+         r.status,
+         r.source,
+         r.score,
+         r.campaign,
+         r.treatment_interest,
+         r.created_at
+    from raw_leads r;
 $$;
 
 -- ---------------------------------------------------------------------
@@ -730,6 +1022,7 @@ begin
       execute format('grant usage on schema l2v to %I', v_role);
       execute format('grant execute on function
         l2v.is_staff(uuid, text),
+        l2v.is_clinic_open(uuid, timestamptz),
         l2v.capture_lead(uuid, uuid, text, text, text, jsonb, timestamptz),
         l2v.capture_lead_guarded(uuid, uuid, text, text, jsonb, timestamptz),
         l2v.assign_lead(uuid, uuid[]),
@@ -737,8 +1030,10 @@ begin
         l2v.qualify_contact(uuid, uuid, text, text, text),
         l2v.rep_ack(uuid, text),
         l2v.close_lead(uuid, uuid),
+        l2v.release_overnight(),
         l2v.escalate_overdue(),
-        l2v.kpi_daily(uuid, date, date)
+        l2v.kpi_daily(uuid, date, date),
+        l2v.recent_leads(uuid, integer)
         to %I', v_role);
     end if;
   end loop;

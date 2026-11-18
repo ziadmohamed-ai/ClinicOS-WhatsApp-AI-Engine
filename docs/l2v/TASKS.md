@@ -86,7 +86,7 @@ Correct the test claim (use the real number from T1), add a "Lead-to-Visit add-o
 and the acceptance checklist below. No marketing claims without a measurement.
 
 ## T9 — Remove the hard-coded clinic from the database layer (needed before a second clinic)
-Today the runtime is tied to one clinic id (`5b201616-fdf0-4a37-8863-bd050ea90376`):
+Today the runtime is tied to one clinic id (`<legacy-hardcoded-clinic-uuid>`):
 - `database/03_rls_policies.sql`: all 12 policies for role `clinicos_api_owner` filter on that literal UUID.
 - `database/02_booking_and_outbox_rpcs.sql` (~line 2397): `log_workflow_error` falls back to that UUID.
 - `database/04_seed_data.sql`: the demo clinic uses it (fine for a demo, but must be clearly marked as demo data).
@@ -96,7 +96,7 @@ Today the runtime is tied to one clinic id (`5b201616-fdf0-4a37-8863-bd050ea9037
   Strongest isolation, simplest to reason about, matches how the code already assumes a single clinic.
 - *Option 2: one shared instance for many clinics.* Policies filter on a transaction-scoped setting (`current_setting('clinicos.clinic_id', true)`) that the workflow must set in the
   same transaction as every query. n8n's Postgres node makes that easy to get wrong, so this option needs a design for how it is enforced and tested.
-Acceptance (either option): no clinic UUID literal remains outside seed/demo files (`grep -rn 5b201616 database workflow nodes` shows only seed data),
+Acceptance (either option): no clinic UUID literal remains outside seed/demo files (`grep -rn <legacy-uuid> database workflow nodes` shows only seed data),
 `log_workflow_error` no longer guesses a clinic, and a SQL test proves that a second clinic's rows are invisible to the first clinic's runtime role.
 
 ## T10 — Make the dashboard show real numbers (or say clearly that it is a demo)

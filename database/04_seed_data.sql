@@ -1,10 +1,13 @@
 -- =====================================================================
--- ClinicOS Sample Seed Data (No PII / No Real Patient Phone Numbers)
+-- DEMO SEED DATA ONLY — DO NOT USE FOR REAL CLINICS
+-- For real clinic onboarding, generate clinic-specific seed SQL with:
+--   ./scripts/new_clinic.sh
+-- Uses obviously fake demo clinic UUID 00000000-0000-4000-8000-000000000001
 -- =====================================================================
 
 INSERT INTO public.clinics (id, name, timezone, settings)
 VALUES (
-  '5b201616-fdf0-4a37-8863-bd050ea90376',
+  '00000000-0000-4000-8000-000000000001',
   'عيادة ClinicOS التخصصية',
   'Asia/Riyadh',
   jsonb_build_object(
@@ -52,28 +55,49 @@ ON CONFLICT (id) DO NOTHING;
 -- Sample Providers (Doctors)
 INSERT INTO public.providers (id, clinic_id, name, specialty, active)
 VALUES
-  ('a2634639-04fd-4485-bb52-b00ac206976c', '5b201616-fdf0-4a37-8863-bd050ea90376', 'د. ليان الحربي', 'طب وتجميل الأسنان (Dentistry)', true),
-  ('f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', '5b201616-fdf0-4a37-8863-bd050ea90376', 'د. سامي العتيبي', 'الأمراض الجلدية والليزر (Dermatology & Laser)', true)
+  ('a2634639-04fd-4485-bb52-b00ac206976c', '00000000-0000-4000-8000-000000000001', 'د. ليان الحربي', 'طب وتجميل الأسنان (Dentistry)', true),
+  ('f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', '00000000-0000-4000-8000-000000000001', 'د. سامي العتيبي', 'الأمراض الجلدية والليزر (Dermatology & Laser)', true)
 ON CONFLICT (id) DO NOTHING;
 
 -- Sample Services
 INSERT INTO public.services (id, clinic_id, code, name_ar, name_en, duration_minutes, price, active)
 VALUES
-  ('4305027d-539f-4d21-b2bb-4be7d2c73816', '5b201616-fdf0-4a37-8863-bd050ea90376', 'DENTAL_CHECKUP', 'فحص الأسنان', 'Dental Checkup', 30, 150, true),
-  ('288e9e39-23c1-40ee-b690-6de3ffb251e7', '5b201616-fdf0-4a37-8863-bd050ea90376', 'DENTAL_CLEANING', 'تنظيف الأسنان', 'Dental Cleaning', 30, 250, true),
-  ('6a5885a0-cde6-4b46-a432-42b4728595b1', '5b201616-fdf0-4a37-8863-bd050ea90376', 'TEETH_WHITENING', 'تبييض الأسنان بالليزر', 'Laser Teeth Whitening', 45, 600, true),
-  ('80cb5019-2f66-47a5-a176-c67e20065777', '5b201616-fdf0-4a37-8863-bd050ea90376', 'DERM_CONSULT', 'استشارة جلدية', 'Dermatology Consultation', 30, 200, true),
-  ('f0556088-7287-4e55-b8dc-7b935834fef8', '5b201616-fdf0-4a37-8863-bd050ea90376', 'HYDRAFACIAL', 'جلسة نضارة البشرة (هيدرافيشل)', 'HydraFacial Skin Glow', 45, 350, true),
-  ('0d1b6057-3dba-409f-abfc-f528f6bf1730', '5b201616-fdf0-4a37-8863-bd050ea90376', 'LASER_SESSION', 'جلسة ليزر', 'Laser Session', 45, 400, true)
+  ('4305027d-539f-4d21-b2bb-4be7d2c73816', '00000000-0000-4000-8000-000000000001', 'DENTAL_CHECKUP', 'فحص الأسنان', 'Dental Checkup', 30, 150, true),
+  ('288e9e39-23c1-40ee-b690-6de3ffb251e7', '00000000-0000-4000-8000-000000000001', 'DENTAL_CLEANING', 'تنظيف الأسنان', 'Dental Cleaning', 30, 250, true),
+  ('6a5885a0-cde6-4b46-a432-42b4728595b1', '00000000-0000-4000-8000-000000000001', 'TEETH_WHITENING', 'تبييض الأسنان بالليزر', 'Laser Teeth Whitening', 45, 600, true),
+  ('80cb5019-2f66-47a5-a176-c67e20065777', '00000000-0000-4000-8000-000000000001', 'DERM_CONSULT', 'استشارة جلدية', 'Dermatology Consultation', 30, 200, true),
+  ('f0556088-7287-4e55-b8dc-7b935834fef8', '00000000-0000-4000-8000-000000000001', 'HYDRAFACIAL', 'جلسة نضارة البشرة (هيدرافيشل)', 'HydraFacial Skin Glow', 45, 350, true),
+  ('0d1b6057-3dba-409f-abfc-f528f6bf1730', '00000000-0000-4000-8000-000000000001', 'LASER_SESSION', 'جلسة ليزر', 'Laser Session', 45, 400, true)
 ON CONFLICT (id) DO NOTHING;
 
 -- Sample Provider-Service Mapping
 INSERT INTO public.provider_services (clinic_id, provider_id, service_id)
 VALUES
-  ('5b201616-fdf0-4a37-8863-bd050ea90376', 'a2634639-04fd-4485-bb52-b00ac206976c', '4305027d-539f-4d21-b2bb-4be7d2c73816'),
-  ('5b201616-fdf0-4a37-8863-bd050ea90376', 'a2634639-04fd-4485-bb52-b00ac206976c', '288e9e39-23c1-40ee-b690-6de3ffb251e7'),
-  ('5b201616-fdf0-4a37-8863-bd050ea90376', 'a2634639-04fd-4485-bb52-b00ac206976c', '6a5885a0-cde6-4b46-a432-42b4728595b1'),
-  ('5b201616-fdf0-4a37-8863-bd050ea90376', 'f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', '80cb5019-2f66-47a5-a176-c67e20065777'),
-  ('5b201616-fdf0-4a37-8863-bd050ea90376', 'f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', 'f0556088-7287-4e55-b8dc-7b935834fef8'),
-  ('5b201616-fdf0-4a37-8863-bd050ea90376', 'f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', '0d1b6057-3dba-409f-abfc-f528f6bf1730')
+  ('00000000-0000-4000-8000-000000000001', 'a2634639-04fd-4485-bb52-b00ac206976c', '4305027d-539f-4d21-b2bb-4be7d2c73816'),
+  ('00000000-0000-4000-8000-000000000001', 'a2634639-04fd-4485-bb52-b00ac206976c', '288e9e39-23c1-40ee-b690-6de3ffb251e7'),
+  ('00000000-0000-4000-8000-000000000001', 'a2634639-04fd-4485-bb52-b00ac206976c', '6a5885a0-cde6-4b46-a432-42b4728595b1'),
+  ('00000000-0000-4000-8000-000000000001', 'f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', '80cb5019-2f66-47a5-a176-c67e20065777'),
+  ('00000000-0000-4000-8000-000000000001', 'f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', 'f0556088-7287-4e55-b8dc-7b935834fef8'),
+  ('00000000-0000-4000-8000-000000000001', 'f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d', '0d1b6057-3dba-409f-abfc-f528f6bf1730')
 ON CONFLICT (clinic_id, provider_id, service_id) DO NOTHING;
+
+-- Sample Provider Working Hours (Sunday-Thursday & Saturday 10:00-18:00, idempotent)
+INSERT INTO public.working_hours (clinic_id, provider_id, weekday, start_time, end_time)
+SELECT
+  '00000000-0000-4000-8000-000000000001'::uuid,
+  p.provider_id,
+  w.weekday,
+  TIME '10:00:00',
+  TIME '18:00:00'
+FROM (VALUES
+  ('a2634639-04fd-4485-bb52-b00ac206976c'::uuid),
+  ('f9ab13a5-e4f6-4acb-9cc9-3ef580ef926d'::uuid)
+) AS p(provider_id)
+CROSS JOIN (VALUES (0::smallint), (1::smallint), (2::smallint), (3::smallint), (4::smallint), (6::smallint)) AS w(weekday)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM public.working_hours AS wh
+  WHERE wh.clinic_id = '00000000-0000-4000-8000-000000000001'::uuid
+    AND wh.provider_id = p.provider_id
+    AND wh.weekday = w.weekday
+);

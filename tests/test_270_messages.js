@@ -67,7 +67,7 @@ function runPipelineTurn({
       ok: true,
       messages: [
         {
-          clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+          clinic_id: '00000000-0000-4000-8000-000000000001',
           contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
           conversation_id: '789d0dde-6927-47b5-b193-8828d2cdc1fd',
           message_id: '00000000-0000-0000-0000-000000000001',
@@ -96,7 +96,7 @@ function runPipelineTurn({
   const loadClinicCtxItem = {
     event: turnEvent,
     clinic_snapshot: {
-      id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+      id: '00000000-0000-4000-8000-000000000001',
       name: 'عيادة ClinicOS التخصصية',
       timezone: 'Asia/Riyadh',
       utc_offset: '+03:00',
@@ -1963,13 +1963,13 @@ function runL2vPrepare(itemJson) {
 addTest('L2V Prepare: ad message with referral.headline extracts click_to_whatsapp and headline campaign', 'Lead-to-Visit', () => {
   const referral = { headline: 'Summer Veneers Offer', source_id: 'ad_101', ctwa_clid: 'clid_xyz' };
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '201001234567',
     message_timestamp: '2026-11-11T09:00:00Z',
     payload: { type: 'text', text: { body: 'بكام التبييض' }, referral }
   });
-  assert.strictEqual(out.clinic_id, '5b201616-fdf0-4a37-8863-bd050ea90376');
+  assert.strictEqual(out.clinic_id, '00000000-0000-4000-8000-000000000001');
   assert.strictEqual(out.contact_id, 'cac3cdbc-ab13-414b-acff-f1adc214e340');
   assert.strictEqual(out.phone_e164, '+201001234567');
   assert.strictEqual(out.source, 'click_to_whatsapp');
@@ -1981,7 +1981,7 @@ addTest('L2V Prepare: ad message with referral.headline extracts click_to_whatsa
 addTest('L2V Prepare: referral with blank headline falls back to referral.source_id', 'Lead-to-Visit', () => {
   const referral = { headline: '   ', source_id: 'ad_202', source_type: 'ad' };
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '+201001234567',
     message_timestamp: '2026-11-11T10:30:00+02:00',
@@ -1995,7 +1995,7 @@ addTest('L2V Prepare: referral with blank headline falls back to referral.source
 
 addTest('L2V Prepare: organic message without referral emits organic source and null campaign/referral', 'Lead-to-Visit', () => {
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '+201001234567',
     message_timestamp: '2026-11-11T12:00:00Z',
@@ -2031,7 +2031,7 @@ addTest('L2V Prepare: never throws on missing, null, or malformed fields and ret
 
 addTest('L2V Prepare: falls back to Meta payload.timestamp unix seconds when message_timestamp is absent', 'Lead-to-Visit', () => {
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '201001234567',
     payload: { timestamp: '1762851600' }
@@ -2043,7 +2043,7 @@ addTest('L2V Prepare: falls back to Meta payload.timestamp unix seconds when mes
 addTest('L2V Prepare: caps campaign at 200 characters on a 5000-character headline', 'Lead-to-Visit', () => {
   const longHeadline = 'A'.repeat(5000);
   const out = runL2vPrepare({
-    clinic_id: '5b201616-fdf0-4a37-8863-bd050ea90376',
+    clinic_id: '00000000-0000-4000-8000-000000000001',
     contact_id: 'cac3cdbc-ab13-414b-acff-f1adc214e340',
     phone: '+201001234567',
     payload: { referral: { headline: longHeadline, source_id: 'ad_long' } }
@@ -2343,13 +2343,13 @@ addTest('L2V SLA Tick Workflow: clinicos-l2v-sla-tick.json passes structural and
   assert.strictEqual(slaWf.nodes.length, 4);
 });
 
-addTest('L2V SLA Tick Workflow Validator Mutations: rejects 10 distinct invalid mutations in memory', 'Lead-to-Visit', () => {
+addTest('L2V SLA Tick Workflow Validator Mutations: rejects 11 distinct invalid mutations in memory', 'Lead-to-Visit', () => {
   const path = require('path');
   const { validateStructure, runSlaTickMutationTests } = require('./validate_workflow.js');
   const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
   const slaWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-l2v-sla-tick.json'));
   const count = runSlaTickMutationTests(origWf, slaWf);
-  assert.strictEqual(count, 10);
+  assert.strictEqual(count, 11);
 });
 
 addTest('L2V Parse AI Output: faq with explicit service preserves service_name_ar while generic faq/injection keeps it null', 'Lead-to-Visit', () => {
@@ -2461,6 +2461,267 @@ addTest('Main & L2V Workflow Audit Validator Mutations: rejects 7 reverted workf
   const l2vWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.l2v.json'));
   assert.strictEqual(runMainWorkflowAuditMutationTests(origWf), 7);
   assert.strictEqual(runMainWorkflowAuditMutationTests(l2vWf), 7);
+});
+
+addTest('T9 Multi-Clinic: legacy hard-coded clinic UUID is absent from database, workflow, nodes, prompts, scripts, tests, docs, and dashboard', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const repoRoot = path.resolve(__dirname, '..');
+  const legacyPrefix = '5b20' + '1616';
+  const legacyFull = legacyPrefix + '-fdf0-4a37-8863-bd050ea90376';
+  const scanDirs = ['database', 'workflow', 'nodes', 'prompts', 'scripts', 'tests', 'docs', 'dashboard'];
+  const hits = [];
+
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile()) {
+        const content = fs.readFileSync(full, 'utf8');
+        if (content.includes(legacyPrefix) || content.includes(legacyFull)) {
+          hits.push(path.relative(repoRoot, full));
+        }
+      }
+    }
+  }
+
+  for (const d of scanDirs) {
+    const abs = path.join(repoRoot, d);
+    if (fs.existsSync(abs)) walk(abs);
+  }
+
+  assert.deepStrictEqual(
+    hits,
+    [],
+    `Legacy hard-coded clinic UUID (${legacyFull}) found in: ${hits.join(', ')}`
+  );
+});
+
+addTest('T9 Multi-Clinic: database/03_rls_policies.sql requires :clinic_id and log_workflow_error requires single clinic row', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const repoRoot = path.resolve(__dirname, '..');
+  const rlsSql = fs.readFileSync(path.join(repoRoot, 'database', '03_rls_policies.sql'), 'utf8');
+  assert.ok(rlsSql.includes('\\if :{?clinic_id}'), '03_rls_policies.sql must check \\if :{?clinic_id}');
+  assert.ok(rlsSql.includes('Missing required psql variable clinic_id'), '03_rls_policies.sql must raise clear missing-variable error');
+  assert.ok(rlsSql.includes("(:'clinic_id')::uuid"), "03_rls_policies.sql must parameterize policies with (:'clinic_id')::uuid");
+
+  const rpcSql = fs.readFileSync(path.join(repoRoot, 'database', '02_booking_and_outbox_rpcs.sql'), 'utf8');
+  assert.ok(
+    rpcSql.includes('log_workflow_error requires exactly 1 clinic row in public.clinics'),
+    'log_workflow_error must raise clear error when clinic count <> 1'
+  );
+});
+
+addTest('T10 Dashboard API: Validate Query Params fails closed on missing, malformed, reversed, and >90-day ranges', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const code = fs.readFileSync(path.join(__dirname, '..', 'nodes', 'dashboard_validate_query.js'), 'utf8');
+  const runValidate = (query) => new Function('$json', code)({ query }).json;
+
+  assert.deepStrictEqual(runValidate({ from: '2026-01-01', to: '2026-01-01' }), {
+    valid: true,
+    from: '2026-01-01',
+    to: '2026-01-01',
+    days: 1,
+  });
+  assert.deepStrictEqual(runValidate({ from: '2026-01-01', to: '2026-03-31' }), {
+    valid: true,
+    from: '2026-01-01',
+    to: '2026-03-31',
+    days: 90,
+  });
+
+  const invalidCases = [
+    undefined,
+    null,
+    {},
+    { from: '2026-01-01' },
+    { to: '2026-01-01' },
+    { from: '', to: '' },
+    { from: 'null', to: 'null' },
+    { from: 'x'.repeat(5000), to: '2026-01-01' },
+    { from: ['2026-01-01'], to: '2026-01-02' },
+    { from: '2026-02-29', to: '2026-03-01' }, // 2026 is not a leap year
+    { from: '2026-05-10', to: '2026-05-09' },
+    { from: '2026-01-01', to: '2026-04-01' }, // 91 days inclusive -> rejected
+  ];
+  for (const bad of invalidCases) {
+    const res = runValidate(bad);
+    assert.strictEqual(res.valid, false, `Expected fail-closed valid=false for ${JSON.stringify(bad)}`);
+    assert.strictEqual(res.status_code, 400);
+  }
+});
+
+addTest('T10 Dashboard API: Format Dashboard Response masks phones (all but last 3 digits), caps at 50, and fails closed when clinic_count !== 1', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const code = fs.readFileSync(path.join(__dirname, '..', 'nodes', 'dashboard_format_response.js'), 'utf8');
+  const runFmt = (row) =>
+    new Function('$json', '$', '$itemIndex', code)(
+      row,
+      () => ({ item: { json: { from: '2026-11-01', to: '2026-11-17' } } }),
+      0
+    ).json;
+
+  assert.throws(() => runFmt({ clinic_count: 0, kpi_daily: [], leads: [] }), /requires exactly 1 clinic row/);
+  assert.throws(() => runFmt({ clinic_count: 2, kpi_daily: [], leads: [] }), /requires exactly 1 clinic row/);
+
+  const sixtyLeads = Array.from({ length: 60 }, (_, idx) => ({
+    lead_id: `id-${idx}`,
+    phone_e164: `+20100999${String(idx).padStart(4, '0')}`,
+    status: 'hot',
+    source: 'click_to_whatsapp',
+    score: 85,
+    treatment_interest: 'تبييض الأسنان',
+  }));
+  const out = runFmt({
+    clinic_count: 1,
+    kpi_daily: [{ day: '2026-11-17', leads: 5, hot_leads: 2, avg_first_reply_s: 4, escalations: 1, booked_leads: 1, visits: 1, no_shows: 0, leads_ads: 3, leads_organic: 2 }],
+    leads: sixtyLeads,
+  });
+
+  assert.strictEqual(out.ok, true);
+  assert.strictEqual(out.leads.length, 50);
+  assert.strictEqual(out.leads[0].phone_masked, '+*********000');
+  assert.strictEqual(out.leads[49].phone_masked, '+*********049');
+  assert.strictEqual(out.leads[0].phone_e164, undefined);
+  assert.strictEqual(out.kpi_daily[0].leads_ads, 3);
+  assert.strictEqual(out.kpi_daily[0].leads_organic, 2);
+});
+
+addTest('T10 Dashboard API Validator Mutations: rejects all 8 workflow security/contract mutations in memory', 'Lead-to-Visit', () => {
+  const path = require('path');
+  const { validateStructure, validateDashboardApiContract, runDashboardApiMutationTests } = require('./validate_workflow.js');
+  const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
+  const dashWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-dashboard-api.json'));
+  validateDashboardApiContract(origWf, dashWf);
+  assert.strictEqual(runDashboardApiMutationTests(origWf, dashWf), 8);
+});
+
+addTest('T11 SLA Tick Validator Mutations: enforces release_overnight() + escalate_overdue() query and all 11 SLA Tick mutations', 'Lead-to-Visit', () => {
+  const path = require('path');
+  const { validateStructure, validateSlaTickContract, runSlaTickMutationTests } = require('./validate_workflow.js');
+  const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
+  const slaWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-l2v-sla-tick.json'));
+  validateSlaTickContract(origWf, slaWf);
+  assert.strictEqual(runSlaTickMutationTests(origWf, slaWf), 11);
+});
+
+addTest('T10 Dashboard UI: shows DEMO DATA banner when unconfigured or on API failure, and renders escaped live data when API succeeds', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const vm = require('vm');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'index.html'), 'utf8');
+  assert.ok(!/Bearer\s+[A-Za-z0-9._-]{10,}/i.test(html), 'dashboard/index.html must not embed any real token');
+  assert.ok(html.includes('YOUR_DASHBOARD_API_URL') && html.includes('YOUR_DASHBOARD_HEADER_TOKEN'), 'dashboard/index.html must contain placeholder config');
+
+  const inlineScript = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1];
+
+  function createHarness(configOverride, fetchImpl) {
+    const els = {};
+    const getEl = (id) => {
+      if (!els[id]) {
+        const hiddenSet = new Set();
+        els[id] = {
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {
+            add(c) { hiddenSet.add(c); },
+            remove(c) { hiddenSet.delete(c); },
+            has(c) { return hiddenSet.has(c); },
+          },
+          appendChild() {},
+        };
+      }
+      return els[id];
+    };
+    const sandbox = {
+      Intl,
+      Date,
+      Promise,
+      setTimeout,
+      encodeURIComponent,
+      CLINICOS_DASHBOARD_CONFIG: configOverride,
+      fetch: fetchImpl,
+      document: {
+        getElementById: getEl,
+        querySelectorAll: () => [],
+        createElement: () => ({ className: '', textContent: '', innerHTML: '', appendChild() {} }),
+      },
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(inlineScript + '\n;globalThis.__load = loadLiveDashboard;', sandbox);
+    return { els, getEl, reload: () => sandbox.__load() };
+  }
+
+  // 1. Unconfigured placeholders -> DEMO DATA banner visible, fetch never called
+  let fetchCalled = false;
+  const h1 = createHarness(undefined, () => { fetchCalled = true; });
+  assert.strictEqual(fetchCalled, false);
+  assert.strictEqual(h1.getEl('demoDataBanner').classList.has('hidden'), false);
+  assert.ok(h1.getEl('demoDataReason').textContent.includes('DEMO DATA'));
+
+  // 2 & 3. Run awaited async loadLiveDashboard() checks (HTTP 200 success + XSS escape, and HTTP 401 failure -> DEMO DATA banner)
+  const { execFileSync } = require('child_process');
+  const asyncCheckScript = `
+    const assert = require('assert');
+    const fs = require('fs');
+    const vm = require('vm');
+    const html = fs.readFileSync(${JSON.stringify(path.join(__dirname, '..', 'dashboard', 'index.html'))}, 'utf8');
+    const inlineScript = [...html.matchAll(/<script>([\\s\\S]*?)<\\/script>/g)][0][1];
+    function makeEnv(cfg, fetchFn) {
+      const els = {};
+      const getEl = (id) => {
+        if (!els[id]) {
+          const set = new Set();
+          els[id] = { id, textContent: '', innerHTML: '', className: '', classList: { add: c => set.add(c), remove: c => set.delete(c), has: c => set.has(c) }, appendChild() {} };
+        }
+        return els[id];
+      };
+      const sb = { Intl, Date, Promise, setTimeout, encodeURIComponent, CLINICOS_DASHBOARD_CONFIG: cfg, fetch: fetchFn, document: { getElementById: getEl, querySelectorAll: () => [], createElement: () => ({ className: '', textContent: '', innerHTML: '', appendChild() {} }) } };
+      sb.globalThis = sb;
+      vm.createContext(sb);
+      vm.runInContext(inlineScript + '\\n;globalThis.__load = loadLiveDashboard;', sb);
+      return { getEl, load: () => sb.__load() };
+    }
+    (async () => {
+      const okEnv = makeEnv(
+        { apiUrl: 'http://127.0.0.1:59999/webhook/clinicos/dashboard', apiToken: 'SYNTHETIC_PLACEHOLDER_TEST' },
+        async () => ({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            from: '2026-10-19',
+            to: '2026-11-17',
+            kpi_daily: [{ day: '2026-11-17', leads: 7, hot_leads: 3, booked_leads: 2, escalations: 1 }],
+            leads: [{ phone_masked: '+*********123', status: 'hot', source: 'click_to_whatsapp', score: 85, treatment_interest: '<img src=x onerror=alert(1)>' }]
+          })
+        })
+      );
+      assert.strictEqual(await okEnv.load(), true);
+      assert.strictEqual(okEnv.getEl('demoDataBanner').classList.has('hidden'), true, 'Banner must hide when live API succeeds');
+      assert.strictEqual(okEnv.getEl('kpiL2vLeads').textContent, '7');
+      assert.strictEqual(okEnv.getEl('kpiL2vHot').textContent, '3');
+      assert.strictEqual(okEnv.getEl('kpiL2vBooked').textContent, '2');
+      assert.ok(!okEnv.getEl('l2vLeadsBody').innerHTML.includes('<img'), 'XSS tag must be escaped in l2vLeadsBody');
+      assert.ok(okEnv.getEl('l2vLeadsBody').innerHTML.includes('&lt;img src=x onerror=alert(1)&gt;'));
+
+      const failEnv = makeEnv(
+        { apiUrl: 'http://127.0.0.1:59999/webhook/clinicos/dashboard', apiToken: 'SYNTHETIC_PLACEHOLDER_TEST' },
+        async () => ({ ok: false, status: 401, json: async () => ({ ok: false }) })
+      );
+      assert.strictEqual(await failEnv.load(), false);
+      assert.strictEqual(failEnv.getEl('demoDataBanner').classList.has('hidden'), false, 'Banner must show DEMO DATA on 401 failure');
+      assert.ok(failEnv.getEl('demoDataReason').textContent.includes('DEMO DATA'));
+    })().catch((e) => { console.error(e); process.exit(1); });
+  `;
+  execFileSync(process.execPath, ['-e', asyncCheckScript], { stdio: 'pipe' });
 });
 
 // ============================================================================

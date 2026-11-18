@@ -33,6 +33,16 @@ function getSourceOfTruthMap() {
       relPath: 'nodes/l2v_prepare.js',
       expected: readLf('nodes/l2v_prepare.js'),
     },
+    'Validate Query Params': {
+      kind: 'jsCode',
+      relPath: 'nodes/dashboard_validate_query.js',
+      expected: readLf('nodes/dashboard_validate_query.js'),
+    },
+    'Format Dashboard Response': {
+      kind: 'jsCode',
+      relPath: 'nodes/dashboard_format_response.js',
+      expected: readLf('nodes/dashboard_format_response.js'),
+    },
     'AI Receptionist': {
       kind: 'systemMessage',
       relPath: 'prompts/receptionist-system-prompt.xml',
@@ -70,6 +80,7 @@ function syncAllWorkflowFiles() {
   const targets = [
     path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.json'),
     path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.l2v.json'),
+    path.join(REPO_ROOT, 'workflow', 'clinicos-dashboard-api.json'),
   ];
   for (const t of targets) {
     if (syncWorkflowFile(t)) {

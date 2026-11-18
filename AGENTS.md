@@ -16,6 +16,7 @@ so a wrong booking or a wrong message to a patient is a real cost. Work small, t
 ```bash
 node tests/test_270_messages.js        # baseline today: 281/283. Failures #10 and #11 are known and pre-existing (see T1)
 ./tests/l2v/run_local.sh               # SQL tests for the Lead-to-Visit add-on on a scratch Postgres (prints "L2V SQL tests: OK")
+./tests/clean_install_test.sh          # Empty scratch Postgres install of database/01..05b + workflow pg_proc check (prints "Clean install test: OK")
 ```
 Any new JS logic goes in `nodes/*.js` (plain JavaScript, no template-literal escaping) with tests; any new SQL goes in
 `database/` with tests in `tests/l2v/l2v_addon_test.sql`.

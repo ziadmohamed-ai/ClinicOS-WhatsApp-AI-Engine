@@ -13,7 +13,9 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const ORIG_WF_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.json');
 const L2V_WF_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-main-engine.l2v.json');
 const SLA_WF_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-l2v-sla-tick.json');
+const DASH_WF_PATH = path.join(REPO_ROOT, 'workflow', 'clinicos-dashboard-api.json');
 const TASKS_MD_PATH = path.join(REPO_ROOT, 'docs', 'l2v', 'TASKS.md');
+const { DASHBOARD_API_QUERY } = require('../scripts/build_l2v_workflow.js');
 
 const EXPECTED_ADDED_NODES = [
   'L2V Prepare',
@@ -451,10 +453,11 @@ function validateSlaTickContract(origWf, slaWf) {
   assert.strictEqual(escalateNode.type, 'n8n-nodes-base.postgres', 'Escalate node must be a Postgres node');
   assert.strictEqual(escalateNode.typeVersion, 2.8, 'Escalate Postgres node typeVersion must be 2.8');
   assert.strictEqual(escalateNode.parameters?.operation, 'executeQuery', 'Escalate Postgres node must use executeQuery');
+  const expectedSlaQuery = 'SELECT l2v.release_overnight() AS released, l2v.escalate_overdue() AS escalated;';
   assert.strictEqual(
     String(escalateNode.parameters?.query ?? '').replace(/\r\n/g, '\n').trim(),
-    'SELECT l2v.escalate_overdue() AS escalated;',
-    `Escalate Postgres node query must be "SELECT l2v.escalate_overdue() AS escalated;", got ${JSON.stringify(escalateNode.parameters?.query)}`
+    expectedSlaQuery,
+    `Escalate Postgres node query must be "${expectedSlaQuery}", got ${JSON.stringify(escalateNode.parameters?.query)}`
   );
   assert.strictEqual(
     escalateNode.parameters?.options?.queryBatching,
@@ -564,7 +567,7 @@ function runSlaTickMutationTests(origWf, slaWf) {
       esc.parameters.query = 'SELECT l2v.escalate_overdue();';
       validateSlaTickContract(origWf, m);
     },
-    /Escalate Postgres node query must be "SELECT l2v\.escalate_overdue\(\) AS escalated;"/,
+    /Escalate Postgres node query must be "SELECT l2v\.release_overnight\(\) AS released, l2v\.escalate_overdue\(\) AS escalated;"/,
     'Mutation 4 (wrong SQL query on escalate Postgres node) must be rejected'
   );
 
@@ -659,7 +662,19 @@ function runSlaTickMutationTests(origWf, slaWf) {
     'Mutation 10 (wrong credentials.postgres.name) must be rejected'
   );
 
-  return 10;
+  // Mutation 11 (T11): legacy SLA Tick query omitting l2v.release_overnight()
+  assert.throws(
+    () => {
+      const m = clone();
+      const esc = m.nodes.find((n) => n.name === 'Escalate Overdue Leads');
+      esc.parameters.query = 'SELECT l2v.escalate_overdue() AS escalated;';
+      validateSlaTickContract(origWf, m);
+    },
+    /Escalate Postgres node query must be "SELECT l2v\.release_overnight\(\) AS released, l2v\.escalate_overdue\(\) AS escalated;"/,
+    'Mutation 11 (omitting l2v.release_overnight() from SLA Tick query) must be rejected'
+  );
+
+  return 11;
 }
 
 function runMainWorkflowAuditMutationTests(wf) {
@@ -758,18 +773,268 @@ function runMainWorkflowAuditMutationTests(wf) {
   return 7;
 }
 
+function validateDashboardApiContract(origWf, dashWf, opts = {}) {
+  assert.strictEqual(
+    dashWf.name,
+    'ClinicOS Dashboard API',
+    `Dashboard API workflow name must be "ClinicOS Dashboard API", got ${JSON.stringify(dashWf.name)}`
+  );
+
+  for (const n of dashWf.nodes || []) {
+    assert.ok(!n.disabled, `Node "${n.name}" in Dashboard API workflow must not have disabled: true`);
+    assert.ok(!n.continueOnFail, `Node "${n.name}" in Dashboard API workflow must not set continueOnFail: true`);
+    assert.ok(
+      n.onError === undefined || n.onError === 'stopWorkflow',
+      `Node "${n.name}" in Dashboard API workflow must fail closed (got onError: ${JSON.stringify(n.onError)})`
+    );
+    assert.notStrictEqual(
+      n.type,
+      'n8n-nodes-base.httpRequest',
+      `Dashboard API workflow must not contain any HTTP Request node (found "${n.name}")`
+    );
+  }
+
+  // Webhook trigger checks: GET + headerAuth + placeholder credential + no embedded secrets
+  const webhooks = (dashWf.nodes || []).filter((n) => n.type === 'n8n-nodes-base.webhook');
+  assert.strictEqual(webhooks.length, 1, 'Dashboard API workflow must have exactly 1 Webhook node');
+  const wh = webhooks[0];
+  assert.strictEqual(wh.parameters?.httpMethod, 'GET', 'Dashboard Webhook must use httpMethod: "GET"');
+  assert.strictEqual(
+    wh.parameters?.authentication,
+    'headerAuth',
+    `Dashboard Webhook must enforce authentication: "headerAuth", got ${JSON.stringify(wh.parameters?.authentication)}`
+  );
+  assert.strictEqual(
+    wh.parameters?.responseMode,
+    'responseNode',
+    'Dashboard Webhook must use responseMode: "responseNode"'
+  );
+  assert.strictEqual(
+    wh.credentials?.httpHeaderAuth?.id,
+    'YOUR_DASHBOARD_HEADER_AUTH_CREDENTIAL_ID',
+    'Dashboard Webhook must bind httpHeaderAuth credential placeholder YOUR_DASHBOARD_HEADER_AUTH_CREDENTIAL_ID'
+  );
+
+  const rawJson = JSON.stringify(dashWf);
+  assert.ok(
+    !/x-dashboard-token["']?\s*:\s*["'][^Y{][^"']+["']/i.test(rawJson) &&
+      !/Bearer\s+[A-Za-z0-9._-]{8,}/i.test(rawJson),
+    'Dashboard API workflow must never embed a literal token or secret'
+  );
+
+  // Postgres query check
+  const pgNode = (dashWf.nodes || []).find((n) => n.name === 'Fetch Dashboard Data');
+  assert.ok(pgNode, 'Dashboard API workflow must contain "Fetch Dashboard Data" Postgres node');
+  assert.strictEqual(pgNode.type, 'n8n-nodes-base.postgres');
+  assert.strictEqual(pgNode.parameters?.operation, 'executeQuery');
+  assert.strictEqual(pgNode.parameters?.options?.queryBatching, 'single');
+  assert.strictEqual(pgNode.credentials?.postgres?.id, 'YOUR_POSTGRES_CREDENTIAL_ID');
+  assert.strictEqual(
+    String(pgNode.parameters?.query ?? '').replace(/\r\n/g, '\n').trim(),
+    DASHBOARD_API_QUERY.trim(),
+    'Fetch Dashboard Data query must match DASHBOARD_API_QUERY (l2v.kpi_daily + l2v.recent_leads max 50)'
+  );
+
+  // Functional fail-closed date validation check on Validate Query Params
+  const valNode = (dashWf.nodes || []).find((n) => n.name === 'Validate Query Params');
+  assert.ok(valNode && valNode.type === 'n8n-nodes-base.code', 'Missing Validate Query Params Code node');
+  const runValidate = new Function('$json', valNode.parameters.jsCode);
+  assert.strictEqual(runValidate({ query: { from: '2026-01-01', to: '2026-03-31' } }).json.valid, true, '90-day range must be valid');
+  assert.strictEqual(
+    runValidate({ query: { from: '2026-01-01', to: '2026-04-01' } }).json.valid,
+    false,
+    'Dashboard API must reject date ranges > 90 days (91 days must fail closed)'
+  );
+  assert.strictEqual(runValidate({ query: {} }).json.valid, false, 'Missing query params must fail closed');
+  assert.strictEqual(runValidate({ query: { from: '2026-02-30', to: '2026-03-01' } }).json.valid, false, 'Impossible calendar date must fail closed');
+  assert.strictEqual(runValidate({ query: { from: '2026-05-10', to: '2026-05-01' } }).json.valid, false, 'Reversed date range must fail closed');
+
+  // Functional phone-masking check on Format Dashboard Response (all digits masked except last 3)
+  const fmtNode = (dashWf.nodes || []).find((n) => n.name === 'Format Dashboard Response');
+  assert.ok(fmtNode && fmtNode.type === 'n8n-nodes-base.code', 'Missing Format Dashboard Response Code node');
+  const runFormat = new Function('$json', '$', '$itemIndex', fmtNode.parameters.jsCode);
+  const lookupValidate = (name) => {
+    if (name === 'Validate Query Params') return { item: { json: { from: '2026-11-01', to: '2026-11-17' } } };
+    throw new Error('Unexpected lookup: ' + name);
+  };
+  const formatted = runFormat(
+    {
+      clinic_count: 1,
+      kpi_daily: [{ day: '2026-11-17', leads: 2, hot_leads: 1, avg_first_reply_s: 5, escalations: 0, booked_leads: 1, visits: 1, no_shows: 0 }],
+      leads: [
+        { lead_id: 'l1', phone_masked: '+201001234567', status: 'hot', source: 'click_to_whatsapp', score: 85 },
+        { lead_id: 'l2', phone_masked: '+*********890', status: 'warm', source: 'organic', score: 40 },
+        { lead_id: 'l3', phone_masked: '12', status: 'cold', source: 'organic', score: 15 },
+      ],
+    },
+    lookupValidate,
+    0
+  ).json;
+
+  assert.strictEqual(
+    formatted.leads[0].phone_masked,
+    '+*********567',
+    `Dashboard API must mask phone numbers (all digits except last 3), got ${JSON.stringify(formatted.leads[0].phone_masked)}`
+  );
+  assert.strictEqual(
+    formatted.leads[1].phone_masked,
+    '+*********890',
+    `Dashboard API must preserve already-masked phone numbers, got ${JSON.stringify(formatted.leads[1].phone_masked)}`
+  );
+  assert.strictEqual(
+    formatted.leads[2].phone_masked,
+    '***',
+    `Dashboard API must fully mask <=3-digit phone values, got ${JSON.stringify(formatted.leads[2].phone_masked)}`
+  );
+
+  // Error Trigger -> Log Workflow Error must match main workflow
+  const origErrorTrigger = origWf.nodes.find((n) => n.name === 'Error Trigger');
+  const origLogError = origWf.nodes.find((n) => n.name === 'Log Workflow Error');
+  const dashErrorTrigger = dashWf.nodes.find((n) => n.name === 'Error Trigger');
+  const dashLogError = dashWf.nodes.find((n) => n.name === 'Log Workflow Error');
+  assert.ok(dashErrorTrigger && dashLogError, 'Dashboard API must include Error Trigger -> Log Workflow Error');
+  assert.strictEqual(JSON.stringify(dashErrorTrigger), JSON.stringify(origErrorTrigger), 'Error Trigger must match main workflow');
+  assert.strictEqual(JSON.stringify(dashLogError), JSON.stringify(origLogError), 'Log Workflow Error must match main workflow');
+  assert.deepStrictEqual(
+    dashWf.connections['Error Trigger'],
+    { main: [[{ node: 'Log Workflow Error', type: 'main', index: 0 }]] },
+    'Error Trigger must connect to Log Workflow Error'
+  );
+
+  if (!opts.skipSourceSync) {
+    validateStructure(dashWf, 'workflow/clinicos-dashboard-api.json');
+  }
+}
+
+function runDashboardApiMutationTests(origWf, dashWf) {
+  const clone = () => JSON.parse(JSON.stringify(dashWf));
+
+  // Mutation 1: header auth removed
+  assert.throws(
+    () => {
+      const m = clone();
+      const wh = m.nodes.find((n) => n.name === 'Dashboard Webhook');
+      wh.parameters.authentication = 'none';
+      delete wh.credentials;
+      validateDashboardApiContract(origWf, m);
+    },
+    /Dashboard Webhook must enforce authentication: "headerAuth"/,
+    'Dashboard Mutation 1 (header auth removed) must be rejected'
+  );
+
+  // Mutation 2: Postgres query changed
+  assert.throws(
+    () => {
+      const m = clone();
+      const pg = m.nodes.find((n) => n.name === 'Fetch Dashboard Data');
+      pg.parameters.query = 'SELECT * FROM l2v.leads LIMIT 50;';
+      validateDashboardApiContract(origWf, m);
+    },
+    /Fetch Dashboard Data query must match DASHBOARD_API_QUERY/,
+    'Dashboard Mutation 2 (query changed) must be rejected'
+  );
+
+  // Mutation 3: extra HTTP Request node added
+  assert.throws(
+    () => {
+      const m = clone();
+      m.nodes.push({
+        parameters: { url: 'https://example.com/leak' },
+        id: 'c1b2c3d4-9999-4000-8000-000000000099',
+        name: 'Extra HTTP Node',
+        type: 'n8n-nodes-base.httpRequest',
+        typeVersion: 4.2,
+        position: [1600, 160],
+      });
+      m.connections['Respond Dashboard JSON'] = { main: [[{ node: 'Extra HTTP Node', type: 'main', index: 0 }]] };
+      validateDashboardApiContract(origWf, m);
+    },
+    /must not contain any HTTP Request node/,
+    'Dashboard Mutation 3 (extra HTTP node) must be rejected'
+  );
+
+  // Mutation 4: disabled node
+  assert.throws(
+    () => {
+      const m = clone();
+      const val = m.nodes.find((n) => n.name === 'Validate Query Params');
+      val.disabled = true;
+      validateDashboardApiContract(origWf, m);
+    },
+    /must not have disabled: true/,
+    'Dashboard Mutation 4 (disabled node) must be rejected'
+  );
+
+  // Mutation 5: onError continue (fails open instead of failing closed)
+  assert.throws(
+    () => {
+      const m = clone();
+      const pg = m.nodes.find((n) => n.name === 'Fetch Dashboard Data');
+      pg.onError = 'continueRegularOutput';
+      validateDashboardApiContract(origWf, m);
+    },
+    /must fail closed/,
+    'Dashboard Mutation 5 (onError continue) must be rejected'
+  );
+
+  // Mutation 6: phone not masked in Format Dashboard Response
+  assert.throws(
+    () => {
+      const m = clone();
+      const fmt = m.nodes.find((n) => n.name === 'Format Dashboard Response');
+      fmt.parameters.jsCode = fmt.parameters.jsCode.replace(
+        'return "+" + "*".repeat(digits.length - 3) + digits.slice(-3);',
+        'return "+" + digits;'
+      );
+      validateDashboardApiContract(origWf, m, { skipSourceSync: true });
+    },
+    /Dashboard API must mask phone numbers/,
+    'Dashboard Mutation 6 (phone not masked) must be rejected'
+  );
+
+  // Mutation 7: non-placeholder headerAuth credential id
+  assert.throws(
+    () => {
+      const m = clone();
+      const wh = m.nodes.find((n) => n.name === 'Dashboard Webhook');
+      wh.credentials.httpHeaderAuth.id = 'real-dashboard-cred-99';
+      validateDashboardApiContract(origWf, m);
+    },
+    /YOUR_DASHBOARD_HEADER_AUTH_CREDENTIAL_ID|YOUR_\*_CREDENTIAL_ID/,
+    'Dashboard Mutation 7 (non-placeholder headerAuth credential) must be rejected'
+  );
+
+  // Mutation 8: >90-day range accepted instead of failing closed
+  assert.throws(
+    () => {
+      const m = clone();
+      const val = m.nodes.find((n) => n.name === 'Validate Query Params');
+      val.parameters.jsCode = val.parameters.jsCode.replace('inclusiveDays > 90', 'inclusiveDays > 365');
+      validateDashboardApiContract(origWf, m, { skipSourceSync: true });
+    },
+    /Dashboard API must reject date ranges > 90 days/,
+    'Dashboard Mutation 8 (>90-day range accepted) must be rejected'
+  );
+
+  return 8;
+}
+
 function main() {
   const args = process.argv.slice(2);
-  const defaultTargets = [ORIG_WF_PATH, L2V_WF_PATH, SLA_WF_PATH];
+  const defaultTargets = [
+    ORIG_WF_PATH,
+    L2V_WF_PATH,
+    SLA_WF_PATH,
+    ...(fs.existsSync(DASH_WF_PATH) ? [DASH_WF_PATH] : []),
+  ];
+  const extraDefaults = [SLA_WF_PATH, DASH_WF_PATH].filter(
+    (wfPath) =>
+      fs.existsSync(wfPath) &&
+      !args.some((p) => path.resolve(process.cwd(), p) === path.resolve(wfPath))
+  );
   const targets =
     args.length > 0
-      ? [
-          ...args.map((p) => path.resolve(process.cwd(), p)),
-          ...(fs.existsSync(SLA_WF_PATH) &&
-          !args.some((p) => path.resolve(process.cwd(), p) === path.resolve(SLA_WF_PATH))
-            ? [SLA_WF_PATH]
-            : []),
-        ]
+      ? [...args.map((p) => path.resolve(process.cwd(), p)), ...extraDefaults]
       : defaultTargets;
 
   const origWf = validateStructure(ORIG_WF_PATH);
@@ -782,6 +1047,9 @@ function main() {
     } else if (path.resolve(t) === path.resolve(SLA_WF_PATH)) {
       validateSlaTickContract(origWf, wf);
       runSlaTickMutationTests(origWf, wf);
+    } else if (path.resolve(t) === path.resolve(DASH_WF_PATH)) {
+      validateDashboardApiContract(origWf, wf);
+      runDashboardApiMutationTests(origWf, wf);
     }
     console.log(`Workflow valid: ${path.relative(REPO_ROOT, t)} (${wf.nodes.length} nodes)`);
   }
@@ -795,6 +1063,8 @@ module.exports = {
   validateStructure,
   validateL2vAddonContract,
   validateSlaTickContract,
+  validateDashboardApiContract,
   runSlaTickMutationTests,
   runMainWorkflowAuditMutationTests,
+  runDashboardApiMutationTests,
 };

@@ -13,7 +13,7 @@
 [![Voice Transcription](https://img.shields.io/badge/Audio-gpt--4o--transcribe-f59e0b?style=for-the-badge&logo=openai&logoColor=white)](./prompts/voice-transcription-prompts.md)
 [![Supabase PostgreSQL](https://img.shields.io/badge/Supabase-PostgreSQL_17_%2B_RLS-3ecf8e?style=for-the-badge&logo=supabase&logoColor=white)](./database/)
 [![WhatsApp Cloud API](https://img.shields.io/badge/Meta-WhatsApp_Cloud_API_v21.0-25D366?style=for-the-badge&logo=whatsapp&logoColor=white)](./workflow/clinicos-main-engine.l2v.json)
-[![Automated QA Suite](https://img.shields.io/badge/QA_%26_Red--Team_Suite-304%2F304_Passing_(100%25)-22c55e?style=for-the-badge&logo=checkmarx&logoColor=white)](./tests/test_270_messages.js)
+[![Automated QA Suite](https://img.shields.io/badge/QA_%26_Red--Team_Suite-314%2F314_Passing_(100%25)-22c55e?style=for-the-badge&logo=checkmarx&logoColor=white)](./tests/test_270_messages.js)
 
 <p align="center">
   <img src="https://img.shields.io/badge/Architecture-Hybrid_AI_%2B_Deterministic_FSM-6366f1?style=flat-square" />
@@ -28,7 +28,7 @@
   <a href="#-n8n-30-node-pipeline-architecture--معمارية-ورك-فلو-n8n">⚙️ n8n Pipeline</a> •
   <a href="#-senior-engineering-decisions--قرارات-التصميم-الهندسية">🧱 Engineering Decisions</a> •
   <a href="#lead-to-visit-add-on">🎯 Lead-to-Visit Add-on</a> •
-  <a href="#-304-scenario-adversarial--qa-benchmark--اختبارات-الجودة-والاختراق-304304-passed">🛡️ 304-Test Benchmark</a> •
+  <a href="#-314-scenario-adversarial--qa-benchmark--اختبارات-الجودة-والاختراق-314314-passed">🛡️ 314-Test Benchmark</a> •
   <a href="#-visual-walkthrough--استعراض-النظام">🎥 Walkthrough</a> •
   <a href="#-quick-start--خطوات-التشغيل">🚀 Quick Start</a>
 </p>
@@ -172,64 +172,73 @@ The workflow ([`workflow/clinicos-main-engine.json`](./workflow/clinicos-main-en
 | **3. LLM Slot & Service Hallucination** | Trusts LLM text output ("I booked you for 10 AM") or lets the LLM invent service codes (`BOTOX_SESSION`). | **4-Layer Deterministic Resolver + Catalog Alias Guard**: `resolveCatalogServiceCode()` maps AI outputs strictly onto live `clinic_snapshot.services[].code` (`DERM_CONSULT`, `TEETH_WHITENING`, `LASER_SESSION`, etc.), and `book_appointment` generates the confirmation message directly from PostgreSQL. |
 | **4. Negation & Hesitation Traps** | Patient says *"لا تأكد الحجز دلوقتي"* or *"متأكدش"* — substring match on `"أكد"` falsely confirms the booking! | **Negation & Question Guard (`negationOrQuestionGuardRe`)**: Detects Arabic/English negations (`لا تأكد`, `متأكدش`, `مش عايز`, `استنى`, `don't confirm`, `wait`) before confirm verbs, unselects the slot safely, and asks how the patient wants to proceed. |
 | **5. Side Questions Mid-Booking** | Patient asks *"هي العيادة فين؟"* or *"الدفع كاش ولا فيزا؟"* while choosing a slot — bot answers FAQ and wipes `pending_booking`. | **Stateful Context Preservation**: Preserves `pending_booking` in `conversations.state` during side FAQs and appends a natural contextual reminder to complete the pending slot selection or contact registration. |
-| **6. Race Conditions & Double-Booking** | Two patients pick 10:00 AM simultaneously, or one patient sends 3 rapid messages. | **`FOR UPDATE` Row Locking + GiST Exclusion Constraint**: `appointments_no_overlap_excl` guarantees zero overlapping appointments at the PostgreSQL index level; superseded turns abort cleanly before writing state. |
+| **6. Race Conditions & Double-Booking** | Two patients pick 10:00 AM simultaneously, or one patient sends 3 rapid messages. | **`FOR UPDATE` Row Locking + GiST Exclusion Constraint**: `appointments_no_overlap` guarantees zero overlapping appointments at the PostgreSQL index level; superseded turns abort cleanly before writing state. |
 
 ---
 
 ## Lead-to-Visit add-on
 
-The **Lead-to-Visit (`l2v`) add-on** extends ClinicOS so that inbound leads—especially from Click-to-WhatsApp ads—are captured, qualified, assigned to reception staff with a WhatsApp quick-reply button, escalated automatically if unacknowledged within the SLA window, and tracked via daily funnel metrics.
+The **Lead-to-Visit (`l2v`) add-on** extends ClinicOS so that inbound leads—especially from Click-to-WhatsApp ads—are captured, qualified, assigned to reception staff during clinic working hours with a WhatsApp quick-reply button, escalated automatically if unacknowledged within the SLA window, and reported via daily ad vs. organic funnel metrics and a header-authenticated Dashboard API.
 
 ### What it does
-- **Guarded Lead Attribution (`L2V Prepare` -> `L2V Gate` -> `l2v.capture_lead_guarded` -> `l2v.capture_lead`):** Captures an open lead in `l2v.leads` when an inbound message includes a Meta Click-to-WhatsApp referral (`payload.referral`, setting `source = 'click_to_whatsapp'` and `campaign = referral.headline ?? referral.source_id`) or when the contact has no `confirmed` or `completed` appointment in `public.appointments` (`source = 'organic'`).
-- **Staff Message Isolation (`l2v.is_staff` + `l2v.rep_ack` + `Is Staff?`):** Recognizes receptionists (`l2v.reps`) and the clinic manager (`l2v.settings.manager_contact_id`) by phone (`public.contacts.phone_e164`). When a receptionist taps the WhatsApp quick-reply button (`استلمت العميل`), `L2V Gate` marks their oldest `pending` assignment in `l2v.assignments` as `acked` (`l2v.rep_ack`) and `Is Staff?` stops the turn so **the AI receptionist never replies to staff**.
-- **Deterministic Lead Qualification (`Parse AI Output` -> `L2V Qualify?` -> `L2V Qualify`):** Extracts structured signals (`lead_timing`: `now | this_month | later`, `lead_budget_band`: `high | mid | low`), suppresses them to `null` on medical, emergency, complaint/human-handoff, or prompt-injection turns, and scores the open lead (`v_score`, stored in `l2v.leads.score`) inside `l2v.set_qualification` (`hot` >= 70, `warm` 30..69, `cold` < 30; `l2v.leads.status` values are strictly `new`, `hot`, `warm`, `cold`, `closed`), called from the workflow through `l2v.qualify_contact`.
-- **Round-Robin Handoff with Button (`l2v.assign_lead` -> `l2v._notify`):** When a lead reaches `hot` (`score >= 70`), assigns it in `l2v.assignments` to the active receptionist (`l2v.reps.is_active`) with the oldest `last_assigned_at` (`nulls first`) and enqueues the `lead_handoff` WhatsApp template message via `public.enqueue_message` with a quick-reply button (`payload = 'l2v_ack:' || assignment_id`).
-- **15-Minute SLA Escalation & Auto-Close on Booking (`ClinicOS L2V SLA Tick` -> `Escalate Overdue Leads` -> `l2v.escalate_overdue`):** Runs every minute. `l2v.assignments.status` values are strictly `pending`, `acked`, `escalated`, `closed_booked` (while `l2v.leads.status` values are strictly `new`, `hot`, `warm`, `cold`, `closed`). If the patient booked a `confirmed` or `completed` appointment (`public.appointments.status`) after the lead was created, `l2v.escalate_overdue` updates `l2v.assignments.status` (not `l2v.leads.status`) from `pending` to `closed_booked` with no escalation. Otherwise, overdue `pending` rows in `l2v.assignments` (`sla_due_at <= now()`) have `l2v.assignments.status` updated to `escalated` (`escalated_at = now()`), the lead is reassigned via `l2v.assign_lead` to the next eligible active rep who has not yet been assigned that lead, and the manager (`l2v.settings.manager_contact_id`) is notified via `sla_breach` (or `sla_breach_no_rep` if all active reps have already been tried).
-- **Fail-Open Reliability:** `L2V Gate` and `L2V Qualify` set `onError: "continueRegularOutput"`, and `L2V Merge` defaults `l2v_is_staff = false` if gate output is missing or errors, ensuring an add-on failure never blocks a patient from receiving an AI reply.
-- **Daily Funnel Reporting (`l2v.kpi_daily(p_clinic_id uuid, p_from date, p_to date)`):** Returns `TABLE (day date, leads integer, hot_leads integer, avg_first_reply_s integer, escalations integer, booked_leads integer, visits integer, no_shows integer)`. `l2v.kpi_daily` does not yet split ad leads from organic leads (all clinic leads in `l2v.leads` are counted together under `leads`).
+- **Guarded Lead Attribution (`L2V Prepare` -> `L2V Gate` -> `l2v.capture_lead_guarded` -> `l2v.capture_lead`):** Captures an open lead in `l2v.leads` when an inbound message includes a Meta Click-to-WhatsApp referral (`payload.referral`, setting `source = 'click_to_whatsapp'` and `campaign = referral.headline ?? referral.source_id`) or when the contact has no `confirmed` or `completed` appointment in `public.appointments` (`source = 'organic'`). If an organic lead later clicks a paid ad, `l2v.capture_lead` upgrades `source` from `'organic'` to the paid source; if a converted patient returns via a new ad referral, `l2v.capture_lead_guarded` closes the old lead and opens a fresh funnel lead (and `l2v.close_lead` allows explicit manual closure).
+- **Staff Message Isolation (`l2v.is_staff` + `l2v.rep_ack` + `Is Staff?`):** Recognizes active receptionists (`l2v.reps.is_active = true`) and the clinic manager (`l2v.settings.manager_contact_id`) by phone (`public.contacts.phone_e164`). When an active receptionist taps the WhatsApp quick-reply button (`استلمت العميل`), `L2V Gate` marks their oldest `pending` assignment in `l2v.assignments` as `acked` (`l2v.rep_ack`) and `Is Staff?` stops the turn so **the AI receptionist never replies to staff**.
+- **Deterministic Lead Qualification (`Parse AI Output` -> `L2V Qualify?` -> `L2V Qualify`):** Extracts structured signals (`lead_timing`: `now | this_month | later`, `lead_budget_band`: `high | mid | low`), suppresses them to `null` on medical, emergency, complaint/human-handoff, or prompt-injection turns, preserves explicit catalog `service_name_ar` on pricing/service FAQs, and scores the open lead (`score` in `l2v.leads`, `hot` >= 70, `warm` 30..69, `cold` < 30; `l2v.leads.status` values are strictly `new`, `hot`, `warm`, `cold`, `closed`) via `l2v.qualify_contact` -> `l2v.set_qualification`.
+- **Working Hours & Overnight Release (`l2v.settings` + `l2v.is_clinic_open` + `l2v.release_overnight`):** `l2v.settings` supports optional `open_time` (`time`), `close_time` (`time`), and `open_days` (`smallint[]`, `0 = Sunday .. 6 = Saturday`), evaluated in the clinic's `public.clinics.timezone`. Default `NULL` means always open (immediate handoff). When the clinic is closed, a newly qualified `hot` lead stays `hot` and unassigned (`assignment_id = null`), and `l2v.escalate_overdue` suppresses SLA escalations and manager alerts. Once the clinic opens, `l2v.release_overnight()` assigns all unassigned `hot` leads in round-robin order with `sla_due_at` starting at opening time.
+- **Round-Robin Handoff & 15-Minute SLA Escalation (`ClinicOS L2V SLA Tick` -> `Escalate Overdue Leads`):** Runs `SELECT l2v.release_overnight() AS released, l2v.escalate_overdue() AS escalated;` every minute. Active reps (`l2v.reps.is_active`) receive `lead_handoff` via `l2v._notify` -> `public.enqueue_message` with a quick-reply button (`payload = 'l2v_ack:' || assignment_id`). If the patient books a `confirmed` or `completed` appointment after the lead was created, `l2v.escalate_overdue` transitions `l2v.assignments.status` (`pending | acked | escalated | closed_booked`) from `pending` to `closed_booked` without escalation; otherwise, while the clinic is open, overdue `pending` rows (`sla_due_at <= now()`) become `escalated`, move to the next eligible active rep, and notify `manager_contact_id` via `sla_breach` (or `sla_breach_no_rep` when all active reps have been tried).
+- **Fail-Open Inbound Reliability:** `L2V Gate` and `L2V Qualify` set `onError: "continueRegularOutput"`, and `L2V Merge` defaults `l2v_is_staff = false` (using `$('Parse Turn & State').all()[$itemIndex]` fallback if item pairing is lost), ensuring an add-on error never stops a patient from getting a reply.
+- **Daily Funnel Reporting & Dashboard API (`l2v.kpi_daily` + `l2v.recent_leads` + `ClinicOS Dashboard API`):**
+  - `l2v.kpi_daily(p_clinic_id uuid, p_from date, p_to date)` returns `(day, leads, hot_leads, avg_first_reply_s, escalations, booked_leads, visits, no_shows, leads_ads, leads_organic)` where `leads_ads + leads_organic = leads` (`avg_first_reply_s` measures the bot's automated WhatsApp reply via `public.outbox` / `public.messages`, not human staff speed).
+  - [`workflow/clinicos-dashboard-api.json`](./workflow/clinicos-dashboard-api.json) (`ClinicOS Dashboard API`, **9 nodes**) exposes a `GET` endpoint (`/webhook/clinicos/dashboard?from=YYYY-MM-DD&to=YYYY-MM-DD`) protected by n8n `headerAuth` (`YOUR_DASHBOARD_HEADER_AUTH_CREDENTIAL_ID`), fails closed (`HTTP 400`) on invalid or `> 90`-day date ranges, and returns `l2v.kpi_daily` plus the latest 50 leads from `l2v.recent_leads` with `phone_masked` masking all digits except the last 3 (`+*********NNN`).
+  - [`dashboard/index.html`](./dashboard/index.html) reads `DASHBOARD_CONFIG` (`apiUrl`, `apiToken`, `headerName: 'x-dashboard-token'`) at the top of its script, renders strictly via `textContent` and `escapeHtml()`, and displays a prominent **`DEMO DATA`** banner (`demoDataBanner`) whenever the API is unconfigured or unreachable.
 
-### Install order
-1. **Database schema & RPC scripts (run in order):**
-   1. [`database/01_schema.sql`](./database/01_schema.sql)
-   2. [`database/02_booking_and_outbox_rpcs.sql`](./database/02_booking_and_outbox_rpcs.sql)
-   3. [`database/03_rls_policies.sql`](./database/03_rls_policies.sql)
-   4. [`database/04_seed_data.sql`](./database/04_seed_data.sql)
-   5. [`database/05_lead_engine.sql`](./database/05_lead_engine.sql) — creates schema `l2v`, tables (`l2v.settings`, `l2v.reps`, `l2v.leads`, `l2v.assignments`), and `SECURITY DEFINER` RPCs (`l2v._notify`, `l2v.is_staff`, `l2v.capture_lead`, `l2v.capture_lead_guarded`, `l2v.assign_lead`, `l2v.set_qualification`, `l2v.qualify_contact`, `l2v.rep_ack`, `l2v.escalate_overdue`, `l2v.kpi_daily`).
-2. **Demo / first-setup seed only (optional):**
-   - [`database/05b_l2v_seed_example.sql`](./database/05b_l2v_seed_example.sql) — inserts example placeholder contacts (`+201000000001`..`+201000000003`), default `15`-minute SLA (`sla_minutes = 15`) in `l2v.settings`, two example active reps in `l2v.reps`, and default template keys under `public.clinics.settings.whatsapp_templates`.
-   - ⚠️ **Never run `database/05b_l2v_seed_example.sql` on a clinic that already has real staff configured; it is for demos and first setup only.**
-3. **n8n workflow import:**
-   - Import [`workflow/clinicos-main-engine.l2v.json`](./workflow/clinicos-main-engine.l2v.json) (`ClinicOS - Main Engine`, **36 nodes**, with `Reminder & Outbox Timer` set to **1 minute**).
-   - Import [`workflow/clinicos-l2v-sla-tick.json`](./workflow/clinicos-l2v-sla-tick.json) (`ClinicOS L2V SLA Tick`, **4 nodes**: 1-minute `Schedule Trigger` -> `Escalate Overdue Leads` + `Error Trigger` -> `Log Workflow Error`).
-4. **Meta WhatsApp templates:**
-   - Submit the three Arabic `UTILITY` templates (`lead_handoff`, `sla_breach`, `sla_breach_no_rep`) in Meta WhatsApp Manager with the exact body text, variable order (`{{1}}..{{4}}`), and `استلمت العميل` quick-reply button documented in [`docs/l2v/TEMPLATES.md`](./docs/l2v/TEMPLATES.md), and register their names and language codes under `public.clinics.settings.whatsapp_templates`.
-
-### Operational & Current Limitations Notes
-1. **Activate `ClinicOS L2V SLA Tick` manually in n8n:** Imported n8n workflows start **inactive** by default. After importing [`workflow/clinicos-l2v-sla-tick.json`](./workflow/clinicos-l2v-sla-tick.json) (and [`workflow/clinicos-main-engine.l2v.json`](./workflow/clinicos-main-engine.l2v.json)), manually toggle `ClinicOS L2V SLA Tick` to **Active** in n8n so 1-minute SLA escalations run.
-2. **Configure Self Error Workflow in n8n Settings:** In n8n **Workflow Settings** for each workflow (`ClinicOS - Main Engine` and `ClinicOS L2V SLA Tick`), set **Error Workflow** to the workflow itself so its internal `Error Trigger -> Log Workflow Error` branch fires on unhandled execution errors.
-3. **Hard-coded clinic UUID & Egypt timezone/offset:** The database runtime layer currently has the demo clinic UUID `5b201616-fdf0-4a37-8863-bd050ea90376` hard-coded in [`database/03_rls_policies.sql`](./database/03_rls_policies.sql) and as a fallback in `public.log_workflow_error` inside [`database/02_booking_and_outbox_rpcs.sql`](./database/02_booking_and_outbox_rpcs.sql) (Task T9 will remove this before a second clinic is onboarded). For an Egypt clinic, configure `clinics.timezone = 'Africa/Cairo'` and ensure the clinic snapshot uses `timezone = 'Africa/Cairo'` and `utc_offset = '+02:00'`.
-4. **Do not run `05b_l2v_seed_example.sql` on a clinic with real staff:** [`database/05b_l2v_seed_example.sql`](./database/05b_l2v_seed_example.sql) inserts placeholder `+20100000000x` staff contacts and example rep rows; it is strictly for local demos or initial setup before editing.
-5. **Dashboard is a static mock until T10 & `l2v.kpi_daily` does not yet split ad vs. organic leads:** [`dashboard/index.html`](./dashboard/index.html) currently displays static mock numbers and sample pipeline log lines; it is not connected to live `l2v.kpi_daily` data until Task T10, and `l2v.kpi_daily` currently returns total `leads` without splitting ad leads from organic leads.
+### Install order & Multi-Clinic Bootstrap (Option 1: One Supabase Project per Clinic)
+1. **Generate clinic seed & install commands with [`scripts/new_clinic.sh`](./scripts/new_clinic.sh):**
+   ```bash
+   ./scripts/new_clinic.sh \
+     --name "Clinic Name" \
+     --phone-number-id "<META_PHONE_NUMBER_ID>" \
+     --timezone "Africa/Cairo" \
+     --utc-offset "+02:00" \
+     --out ./clinic_seed.sql
+   ```
+   `scripts/new_clinic.sh` generates a fresh `CLINIC_ID` UUID, writes an idempotent clinic seed SQL (`public.clinics` with `timezone`, `settings.utc_offset`, `settings.snapshot`, placeholder `public.providers` / `public.services` / `public.working_hours`, and `whatsapp_templates` keys), prints the ordered `psql` install commands, and prints the three Arabic Meta template texts from [`docs/l2v/TEMPLATES.md`](./docs/l2v/TEMPLATES.md).
+2. **Run the PostgreSQL scripts in exact order (`ON_ERROR_STOP=1`):**
+   1. [`database/01_schema.sql`](./database/01_schema.sql) — `private` schema, core `public.*` tables, GiST exclusion constraint `appointments_no_overlap`, and indexes.
+   2. [`database/02_booking_and_outbox_rpcs.sql`](./database/02_booking_and_outbox_rpcs.sql) — core booking, reschedule, cancellation, outbox, webhook HMAC/Vault, and single-clinic `public.log_workflow_error` RPCs.
+   3. [`database/02a_live_sync_profile_and_slots.sql`](./database/02a_live_sync_profile_and_slots.sql) — `contacts.patient_profile` column, `public.get_patient_profile`, `public.update_patient_profile`, and 7-parameter `public.get_available_slots(..., p_ignore_appointment_id)`.
+   4. [`database/03_rls_policies.sql`](./database/03_rls_policies.sql) — requires `psql -v ON_ERROR_STOP=1 -v clinic_id=<CLINIC_ID> -f database/03_rls_policies.sql` (fails closed if `clinic_id` is omitted or invalid) and scopes all 12 `clinicos_api_owner` RLS policies to `<CLINIC_ID>`.
+   5. Your generated `./clinic_seed.sql` from `scripts/new_clinic.sh` (or [`database/04_seed_data.sql`](./database/04_seed_data.sql) for local demo installs only, using fake demo UUID `00000000-0000-4000-8000-000000000001`).
+   6. [`database/05_lead_engine.sql`](./database/05_lead_engine.sql) — schema `l2v`, tables (`l2v.settings`, `l2v.reps`, `l2v.leads`, `l2v.assignments`), and `SECURITY DEFINER` RPCs (`l2v._notify`, `l2v.is_staff`, `l2v.is_clinic_open`, `l2v.capture_lead`, `l2v.capture_lead_guarded`, `l2v.assign_lead`, `l2v.set_qualification`, `l2v.qualify_contact`, `l2v.rep_ack`, `l2v.close_lead`, `l2v.release_overnight`, `l2v.escalate_overdue`, `l2v.kpi_daily`, `l2v.recent_leads`).
+   7. *(Optional — demo/staging setup only)* [`database/05b_l2v_seed_example.sql`](./database/05b_l2v_seed_example.sql) — seeds placeholder `+201000000001`..`+201000000003` contacts, `sla_minutes = 15`, two example reps, and `whatsapp_templates` keys. **Never run on a clinic that already has real staff configured.**
+3. **Import n8n workflows & configure settings:**
+   - Import [`workflow/clinicos-main-engine.l2v.json`](./workflow/clinicos-main-engine.l2v.json) (`ClinicOS - Main Engine`, **36 nodes**, 1-minute `Reminder & Outbox Timer`), [`workflow/clinicos-l2v-sla-tick.json`](./workflow/clinicos-l2v-sla-tick.json) (`ClinicOS L2V SLA Tick`, **4 nodes**), and [`workflow/clinicos-dashboard-api.json`](./workflow/clinicos-dashboard-api.json) (`ClinicOS Dashboard API`, **9 nodes**).
+   - Bind real n8n credentials in place of placeholders (`YOUR_POSTGRES_CREDENTIAL_ID`, `YOUR_WHATSAPP_CREDENTIAL_ID`, `YOUR_OPENAI_CREDENTIAL_ID`, `YOUR_DASHBOARD_HEADER_AUTH_CREDENTIAL_ID`).
+   - In **Workflow Settings** for each workflow, set **Error Workflow** to **the workflow itself** (`Error Trigger` -> `Log Workflow Error`).
+   - **Manually activate `ClinicOS L2V SLA Tick`** (and `ClinicOS Dashboard API` / `ClinicOS - Main Engine`) in n8n, as imported workflows start inactive by default.
+4. **Submit Meta WhatsApp templates per clinic:**
+   - In each clinic's Meta WhatsApp Business Account, submit the three Arabic `UTILITY` templates (`lead_handoff` with quick-reply button `استلمت العميل`, `sla_breach`, and `sla_breach_no_rep`) with the exact body text and variable order in [`docs/l2v/TEMPLATES.md`](./docs/l2v/TEMPLATES.md), and ensure their approved names match `public.clinics.settings -> 'whatsapp_templates'`.
+5. **Staging verification runbook:** Follow **[`docs/l2v/STAGING.md`](./docs/l2v/STAGING.md)** for the full human staging runbook (staging Supabase + n8n + Meta test number setup, activation order, 8-step acceptance + voice/batch tests, and failure triage).
 
 ### Acceptance checklist for the whole add-on (manual, in staging, by a human)
-1. Ad message -> a row in `l2v.leads` with `source` and `campaign`.
-2. Patient says "I want to start this week" and the price is fine -> lead becomes `hot` and the rep gets the `lead_handoff` template with the button.
+1. Ad message -> a row in `l2v.leads` with `source` and `campaign` (`leads_ads` increments).
+2. Patient says "I want to start this week" and the price is fine -> lead becomes `hot` and (during open hours) the rep gets the `lead_handoff` template with the `استلمت العميل` button (during closed hours it stays `hot` and unassigned until `l2v.release_overnight()` runs at opening time).
 3. Rep taps the button -> assignment in `l2v.assignments` becomes `acked`, the AI does **not** answer the rep.
-4. Nobody taps for 15 minutes -> the assignment becomes `escalated`, the next rep gets it, and the manager gets `sla_breach`.
+4. Nobody taps for 15 minutes (during open hours) -> the assignment becomes `escalated`, the next active rep gets it, and the manager gets `sla_breach`.
 5. Patient books before the SLA ends -> `l2v.assignments.status` becomes `closed_booked`, no escalation.
-6. `l2v.kpi_daily` returns plausible numbers (`day`, `leads`, `hot_leads`, `avg_first_reply_s`, `escalations`, `booked_leads`, `visits`, `no_shows`).
+6. `l2v.kpi_daily` and `ClinicOS Dashboard API` return matching numbers (`day`, `leads`, `hot_leads`, `avg_first_reply_s`, `escalations`, `booked_leads`, `visits`, `no_shows`, `leads_ads`, `leads_organic` with `leads_ads + leads_organic = leads`) and masked recent leads (`phone_masked`).
 
 ---
 
-## 🛡️ 304-Scenario Adversarial & QA Benchmark | اختبارات الجودة والاختراق (`304/304 Passed`)
+## 🛡️ 314-Scenario Adversarial & QA Benchmark | اختبارات الجودة والاختراق (`314/314 Passed`)
 
-ClinicOS includes a zero-dependency automated evaluation and Red-Team regression suite in **[`tests/test_270_messages.js`](./tests/test_270_messages.js)** (`304/304` passing), a workflow structure and L2V contract validator in **[`tests/validate_workflow.js`](./tests/validate_workflow.js)**, and a scratch PostgreSQL test suite in **[`tests/l2v/l2v_addon_test.sql`](./tests/l2v/l2v_addon_test.sql)** (`./tests/l2v/run_local.sh`):
+ClinicOS includes a zero-dependency automated evaluation and Red-Team regression suite in **[`tests/test_270_messages.js`](./tests/test_270_messages.js)** (`314/314` passing), a workflow structure, L2V contract, SLA Tick, and Dashboard API mutation validator in **[`tests/validate_workflow.js`](./tests/validate_workflow.js)**, an L2V PostgreSQL test suite in **[`tests/l2v/l2v_addon_test.sql`](./tests/l2v/l2v_addon_test.sql)** (`./tests/l2v/run_local.sh`), and an empty-database clean-install + `pg_proc` signature drift harness in **[`tests/clean_install_test.sh`](./tests/clean_install_test.sh)**:
 
 ```bash
 node tests/test_270_messages.js
-node tests/validate_workflow.js
+node tests/validate_workflow.js workflow/clinicos-main-engine.json workflow/clinicos-main-engine.l2v.json
 ./tests/l2v/run_local.sh
+./tests/clean_install_test.sh
 ```
 
 | Category | Scenarios | Result | What It Verifies |
@@ -246,8 +255,8 @@ node tests/validate_workflow.js
 | **10. Option 1: Name & Phone Registration** | `10` | ✅ `10/10` | Holding slot for new patients, extracting `Full Name + Phone` or `"على نفس الرقم ده"`, single-message registration, and skipping prompt for returning patients. |
 | **11. Live Catalog Service Resolution** | `10` | ✅ `10/10` | Verifies exact mapping against live clinic catalog (`DERM_CONSULT`, `TEETH_WHITENING`, `LASER_SESSION`, `DENTAL_CLEANING`, `DENTAL_CHECKUP`, `HYDRAFACIAL`). |
 | **12. Wording Policy** | `13` | ✅ `13/13` | Ensures patient-facing wording comes from the AI via `aiWording(...)` while facts (slots, doctors, phones) come deterministically from code. |
-| **13. Lead-to-Visit** | `20` | ✅ `20/20` | Verifies `L2V Prepare` referral/phone normalization and `Parse AI Output` sanitization and safety suppression of `lead_timing` and `lead_budget_band`. |
-| **TOTAL** | **`304`** | 🏆 **`304/304`** | **100% Pass Rate (`0 Failed`)** |
+| **13. Lead-to-Visit** | `30` | ✅ `30/30` | Verifies `L2V Prepare`, `Parse AI Output` lead-signal safety suppression & FAQ `service_name_ar`, multi-item voice batch routing, multi-clinic UUID/RLS checks, `ClinicOS Dashboard API` validation & phone masking, and SLA Tick / Dashboard mutation suites. |
+| **TOTAL** | **`314`** | 🏆 **`314/314`** | **100% Pass Rate (`0 Failed`)** |
 
 ---
 
@@ -278,14 +287,14 @@ node tests/validate_workflow.js
 
 | Folder / File | Description | المحتوى الهندسي |
 | :--- | :--- | :--- |
-| 📁 **[`workflow/`](./workflow/)** | [`clinicos-main-engine.json`](./workflow/clinicos-main-engine.json)<br>[`clinicos-main-engine.l2v.json`](./workflow/clinicos-main-engine.l2v.json)<br>[`clinicos-l2v-sla-tick.json`](./workflow/clinicos-l2v-sla-tick.json) | ووركفلو **n8n** الأساسي (30 عقدة)، نسخة **Lead-to-Visit** الكاملة (36 عقدة، مؤقت Outbox كل دقيقة)، ووركفلو **`ClinicOS L2V SLA Tick`** (4 عقد لفحص وتصعيد SLA كل دقيقة). |
-| 📁 **[`database/`](./database/)** | [`01_schema.sql`](./database/01_schema.sql)<br>[`02_booking_and_outbox_rpcs.sql`](./database/02_booking_and_outbox_rpcs.sql)<br>[`03_rls_policies.sql`](./database/03_rls_policies.sql)<br>[`04_seed_data.sql`](./database/04_seed_data.sql)<br>[`05_lead_engine.sql`](./database/05_lead_engine.sql)<br>[`05b_l2v_seed_example.sql`](./database/05b_l2v_seed_example.sql) | جداول ودوال الحجز والـ Outbox، سياسات RLS، محرك **Lead-to-Visit (`l2v`)**، وملف البيانات التجريبية `05b` (للتجربة والإعداد الأولي فقط). |
-| 📁 **[`nodes/`](./nodes/)** | [`parse_turn_and_state.js`](./nodes/parse_turn_and_state.js)<br>[`l2v_prepare.js`](./nodes/l2v_prepare.js)<br>[`parse_ai_output.js`](./nodes/parse_ai_output.js)<br>[`format_slot_list.js`](./nodes/format_slot_list.js) | الكود المصدري (Source of Truth) لعقد JavaScript في n8n، متزامن ومفحوص آلياً مع ملفات الووركفلو. |
+| 📁 **[`workflow/`](./workflow/)** | [`clinicos-main-engine.json`](./workflow/clinicos-main-engine.json)<br>[`clinicos-main-engine.l2v.json`](./workflow/clinicos-main-engine.l2v.json)<br>[`clinicos-l2v-sla-tick.json`](./workflow/clinicos-l2v-sla-tick.json)<br>[`clinicos-dashboard-api.json`](./workflow/clinicos-dashboard-api.json) | ووركفلو **n8n** الأساسي (30 عقدة)، نسخة **Lead-to-Visit** الكاملة (36 عقدة، مؤقت Outbox كل دقيقة)، ووركفلو **`ClinicOS L2V SLA Tick`** (4 عقد)، ووركفلو **`ClinicOS Dashboard API`** (9 عقد). |
+| 📁 **[`database/`](./database/)** | [`01_schema.sql`](./database/01_schema.sql)<br>[`02_booking_and_outbox_rpcs.sql`](./database/02_booking_and_outbox_rpcs.sql)<br>[`02a_live_sync_profile_and_slots.sql`](./database/02a_live_sync_profile_and_slots.sql)<br>[`03_rls_policies.sql`](./database/03_rls_policies.sql)<br>[`04_seed_data.sql`](./database/04_seed_data.sql)<br>[`05_lead_engine.sql`](./database/05_lead_engine.sql)<br>[`05b_l2v_seed_example.sql`](./database/05b_l2v_seed_example.sql) | جداول ودوال الحجز والـ Outbox، ملف `02a` لمزامنة دوال ملف المريض والمواعيد (7 معاملات)، سياسات RLS المعلمية (`-v clinic_id=...`)، محرك **Lead-to-Visit (`l2v`)**، وملف البيانات التجريبية `05b`. |
+| 📁 **[`nodes/`](./nodes/)** | [`parse_turn_and_state.js`](./nodes/parse_turn_and_state.js)<br>[`l2v_prepare.js`](./nodes/l2v_prepare.js)<br>[`parse_ai_output.js`](./nodes/parse_ai_output.js)<br>[`format_slot_list.js`](./nodes/format_slot_list.js)<br>[`dashboard_validate_query.js`](./nodes/dashboard_validate_query.js)<br>[`dashboard_format_response.js`](./nodes/dashboard_format_response.js) | الكود المصدري (Source of Truth) لعقد JavaScript في n8n، متزامن ومفحوص آلياً مع ملفات الووركفلو. |
 | 📁 **[`prompts/`](./prompts/)** | [`receptionist-system-prompt.xml`](./prompts/receptionist-system-prompt.xml)<br>[`voice-transcription-prompts.md`](./prompts/voice-transcription-prompts.md) | هندسة الأوامر (XML System Prompts) لموديل `GPT-4.1` وموديل الصوت `gpt-4o-transcribe`. |
-| 📁 **[`scripts/`](./scripts/)** | [`build_l2v_workflow.js`](./scripts/build_l2v_workflow.js)<br>[`sync_node_code.js`](./scripts/sync_node_code.js) | سكربتات بناء ومزامنة كود العقد مع ملفات ووركفلو n8n. |
-| 📁 **[`docs/l2v/`](./docs/l2v/)** | [`TASKS.md`](./docs/l2v/TASKS.md)<br>[`TEMPLATES.md`](./docs/l2v/TEMPLATES.md) | خطة ومعمارية إضافة Lead-to-Visit، وتوثيق قوالب واتساب (`lead_handoff`, `sla_breach`, `sla_breach_no_rep`) وترتيب متغيراتها. |
-| 📁 **[`tests/`](./tests/)** | [`test_270_messages.js`](./tests/test_270_messages.js)<br>[`validate_workflow.js`](./tests/validate_workflow.js)<br>[`l2v/l2v_addon_test.sql`](./tests/l2v/l2v_addon_test.sql)<br>[`l2v/run_local.sh`](./tests/l2v/run_local.sh)<br>[`parser_and_formatter.js`](./tests/parser_and_formatter.js)<br>[`build_upgraded_nodes.js`](./tests/build_upgraded_nodes.js) | حزمة الاختبارات الآلية الشاملة (**304 سيناريو** JS، فاحص عقد الووركفلو، واختبارات PostgreSQL لمحرك `l2v`). |
-| 📁 **[`dashboard/`](./dashboard/)** | [`index.html`](./dashboard/index.html) | Static UI mock preview (displays hard-coded sample data until Task T10 connects it to `l2v.kpi_daily`) — نموذج واجهة عرض ثابت (Static Mock حتى المهمة T10، غير متصل حالياً ببيانات حية). |
+| 📁 **[`scripts/`](./scripts/)** | [`build_l2v_workflow.js`](./scripts/build_l2v_workflow.js)<br>[`sync_node_code.js`](./scripts/sync_node_code.js)<br>[`new_clinic.sh`](./scripts/new_clinic.sh) | سكربتات بناء ومزامنة ملفات الووركفلو، وسكربت `new_clinic.sh` لتجهيز عيادة جديدة وقوالب واتساب الخاصة بها. |
+| 📁 **[`docs/l2v/`](./docs/l2v/)** | [`TASKS.md`](./docs/l2v/TASKS.md)<br>[`TEMPLATES.md`](./docs/l2v/TEMPLATES.md)<br>[`STAGING.md`](./docs/l2v/STAGING.md) | خطة ومعمارية إضافة Lead-to-Visit، توثيق قوالب واتساب (`lead_handoff`, `sla_breach`, `sla_breach_no_rep`)، ودليل اختبار بيئة Staging خطوة بخطوة. |
+| 📁 **[`tests/`](./tests/)** | [`test_270_messages.js`](./tests/test_270_messages.js)<br>[`validate_workflow.js`](./tests/validate_workflow.js)<br>[`clean_install_test.sh`](./tests/clean_install_test.sh)<br>[`clean_install_test.sql`](./tests/clean_install_test.sql)<br>[`l2v/l2v_addon_test.sql`](./tests/l2v/l2v_addon_test.sql)<br>[`l2v/run_local.sh`](./tests/l2v/run_local.sh) | حزمة الاختبارات الآلية الشاملة (**314 سيناريو** JS، فاحص عقد الووركفلو واختبارات الطفرات، اختبار التثبيت النظيف وفحص توافق `pg_proc`، واختبارات PostgreSQL لمحرك `l2v`). |
+| 📁 **[`dashboard/`](./dashboard/)** | [`index.html`](./dashboard/index.html) | واجهة لوحة التحكم ومحاكي واتساب: تتصل بـ `ClinicOS Dashboard API` عند ضبط `DASHBOARD_CONFIG`، وتعرض لافتة **`DEMO DATA`** واضحة عند عدم الضبط أو تعذّر الاتصال. |
 | 📁 **[`media/`](./media/)** | `hero-banner.png` + Walkthrough screenshots | الصور التوضيحية للنظام ومراحل الحجز والتحويل البشري. |
 | 📄 **[`.env.example`](./.env.example)** | Environment variables template | نموذج متغيرات البيئة المطلوبة لتشغيل المشروع بأمان (بدون أي مفاتيح سرية). |
 
@@ -294,27 +303,30 @@ node tests/validate_workflow.js
 ## 🚀 Quick Start | خطوات التشغيل السريع
 
 ### 1. Prepare Supabase Database
-Execute the SQL scripts inside **[`database/`](./database/)** in order inside your Supabase SQL Editor:
-1. [`database/01_schema.sql`](./database/01_schema.sql) — Core tables, GiST exclusion constraints, and indexes.
-2. [`database/02_booking_and_outbox_rpcs.sql`](./database/02_booking_and_outbox_rpcs.sql) — Transactional booking, reschedule, cancellation, patient profile memory, and outbox RPCs.
-3. [`database/03_rls_policies.sql`](./database/03_rls_policies.sql) — Row-Level Security policies and least-privilege grants for `n8n_runtime`.
-4. [`database/04_seed_data.sql`](./database/04_seed_data.sql) — Demo specialty clinic, providers, services, working hours, and Vault secret placeholders.
-5. [`database/05_lead_engine.sql`](./database/05_lead_engine.sql) — Lead-to-Visit (`l2v`) schema, tables (`l2v.settings`, `l2v.reps`, `l2v.leads`, `l2v.assignments`), qualification scoring (`l2v.set_qualification`, `l2v.qualify_contact`), round-robin assignment (`l2v.assign_lead`), SLA escalation (`l2v.escalate_overdue`), and `l2v.kpi_daily` RPCs.
-6. *(Optional — demo/first setup only)* [`database/05b_l2v_seed_example.sql`](./database/05b_l2v_seed_example.sql) — Example manager/rep staff contacts (`+20100000000x`), 15-minute SLA setting, and `whatsapp_templates` mapping. **Do not run on a clinic that already has real staff configured.**
+Generate your clinic seed SQL with **[`scripts/new_clinic.sh`](./scripts/new_clinic.sh)** and execute the SQL scripts in **[`database/`](./database/)** in order (`psql -v ON_ERROR_STOP=1`):
+1. [`database/01_schema.sql`](./database/01_schema.sql) — `private` schema, core `public.*` tables, `appointments_no_overlap`, and indexes.
+2. [`database/02_booking_and_outbox_rpcs.sql`](./database/02_booking_and_outbox_rpcs.sql) — Transactional booking, reschedule, cancellation, outbox, and single-clinic `public.log_workflow_error` RPCs.
+3. [`database/02a_live_sync_profile_and_slots.sql`](./database/02a_live_sync_profile_and_slots.sql) — `patient_profile`, `public.get_patient_profile`, `public.update_patient_profile`, and 7-parameter `public.get_available_slots`.
+4. [`database/03_rls_policies.sql`](./database/03_rls_policies.sql) — Run with `-v clinic_id=<CLINIC_ID>` to scope RLS policies and grants for `clinicos_api_owner` (granted to `clinicos_n8n_runtime`).
+5. Your generated clinic seed SQL from `./scripts/new_clinic.sh` (or [`database/04_seed_data.sql`](./database/04_seed_data.sql) for local demo data only).
+6. [`database/05_lead_engine.sql`](./database/05_lead_engine.sql) — Lead-to-Visit (`l2v`) schema, tables (`l2v.settings`, `l2v.reps`, `l2v.leads`, `l2v.assignments`), working hours (`l2v.is_clinic_open`, `l2v.release_overnight`), SLA escalation (`l2v.escalate_overdue`), `l2v.kpi_daily`, and `l2v.recent_leads` RPCs.
+7. *(Optional — demo/staging setup only)* [`database/05b_l2v_seed_example.sql`](./database/05b_l2v_seed_example.sql) — Example manager/rep staff contacts (`+20100000000x`), 15-minute SLA setting, and `whatsapp_templates` mapping. **Do not run on a clinic that already has real staff configured.**
 
 ### 2. Import the n8n Workflows
-1. Open your **n8n** instance (`v1.80+` recommended) and import **[`workflow/clinicos-main-engine.l2v.json`](./workflow/clinicos-main-engine.l2v.json)** (36 nodes; or [`workflow/clinicos-main-engine.json`](./workflow/clinicos-main-engine.json) for the 30-node base engine without L2V) and **[`workflow/clinicos-l2v-sla-tick.json`](./workflow/clinicos-l2v-sla-tick.json)** (`ClinicOS L2V SLA Tick`, 4 nodes).
-2. Connect your 3 credentials in n8n:
-   - **PostgreSQL (`ClinicOS Runtime PostgreSQL`)**: Connect using the `n8n_runtime` role from `.env.example`.
-   - **OpenAI API**: API key with access to `gpt-4.1` and `gpt-4o-transcribe`.
-   - **WhatsApp Cloud API**: Meta Business System User access token.
-3. In n8n **Workflow Settings** for each workflow, set **Error Workflow** to the workflow itself, and **manually activate** `ClinicOS L2V SLA Tick`.
+1. Open your **n8n** instance (`v1.80+` recommended) and import **[`workflow/clinicos-main-engine.l2v.json`](./workflow/clinicos-main-engine.l2v.json)** (36 nodes; or [`workflow/clinicos-main-engine.json`](./workflow/clinicos-main-engine.json) for the 30-node base engine without L2V), **[`workflow/clinicos-l2v-sla-tick.json`](./workflow/clinicos-l2v-sla-tick.json)** (`ClinicOS L2V SLA Tick`, 4 nodes), and **[`workflow/clinicos-dashboard-api.json`](./workflow/clinicos-dashboard-api.json)** (`ClinicOS Dashboard API`, 9 nodes).
+2. Connect your credentials in n8n:
+   - **PostgreSQL (`ClinicOS Runtime PostgreSQL`)**: Connect using `clinicos_n8n_runtime` (member of `clinicos_api_owner`) from `.env.example`.
+   - **OpenAI (`OpenAI account`)**: API key with access to `gpt-4.1` and `gpt-4o-transcribe`.
+   - **WhatsApp Cloud API (`WhatsApp account`)**: Meta Business System User access token.
+   - **Header Auth (`ClinicOS Dashboard Header Auth`)**: Header `x-dashboard-token` for `ClinicOS Dashboard API`.
+3. In n8n **Workflow Settings** for each workflow, set **Error Workflow** to **the workflow itself**, and **manually activate** `ClinicOS L2V SLA Tick` (plus `ClinicOS Dashboard API` and `ClinicOS - Main Engine`).
 
-### 3. Run the 304-Scenario Verification Suite
+### 3. Run the 314-Scenario & Clean-Install Verification Suite
 ```bash
 node tests/test_270_messages.js
-node tests/validate_workflow.js
+node tests/validate_workflow.js workflow/clinicos-main-engine.json workflow/clinicos-main-engine.l2v.json
 ./tests/l2v/run_local.sh
+./tests/clean_install_test.sh
 ```
 
 ### 4. Configure Meta Webhook & Templates
