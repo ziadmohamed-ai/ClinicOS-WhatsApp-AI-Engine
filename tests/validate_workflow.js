@@ -173,6 +173,26 @@ function validateStructure(wfOrPath, customLabel) {
       promptExpr.includes('msgs.find(') && !promptExpr.includes('messages?.[0]'),
       `${rel}: Transcribe Voice prompt must resolve the actionable voice message via msgs.find(...) rather than hardcoding messages?.[0]`
     );
+    assert.strictEqual(
+      txVoiceNode.retryOnFail,
+      true,
+      `${rel}: Transcribe Voice must set retryOnFail: true`
+    );
+    assert.strictEqual(
+      txVoiceNode.maxTries,
+      3,
+      `${rel}: Transcribe Voice must set maxTries: 3, got ${JSON.stringify(txVoiceNode.maxTries)}`
+    );
+    assert.strictEqual(
+      txVoiceNode.waitBetweenTries,
+      2000,
+      `${rel}: Transcribe Voice must set waitBetweenTries: 2000, got ${JSON.stringify(txVoiceNode.waitBetweenTries)}`
+    );
+    assert.strictEqual(
+      txVoiceNode.onError,
+      'continueRegularOutput',
+      `${rel}: Transcribe Voice must set onError: "continueRegularOutput", got ${JSON.stringify(txVoiceNode.onError)}`
+    );
   }
   const saveTxNode = wf.nodes.find((n) => n.name === 'Save & Inject Transcript');
   if (saveTxNode) {
@@ -768,6 +788,48 @@ function runMainWorkflowAuditMutationTests(wf) {
     },
     /Save & Inject Transcript queryReplacement must locate the actionable voice item via msgs\.findIndex/,
     'Mutation 7 (reverted queryReplacement in Save & Inject Transcript) must be rejected'
+  );
+
+  // Mutation 8 (H1): Transcribe Voice retryOnFail disabled or wrong maxTries/waitBetweenTries/onError
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      n.retryOnFail = false;
+      validateStructure(m, 'mutation-transcribe-no-retry');
+    },
+    /Transcribe Voice must set retryOnFail: true/,
+    'Mutation 8a (Transcribe Voice retryOnFail disabled) must be rejected'
+  );
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      n.maxTries = 2;
+      validateStructure(m, 'mutation-transcribe-maxtries');
+    },
+    /Transcribe Voice must set maxTries: 3/,
+    'Mutation 8b (Transcribe Voice maxTries != 3) must be rejected'
+  );
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      n.waitBetweenTries = 1000;
+      validateStructure(m, 'mutation-transcribe-wait');
+    },
+    /Transcribe Voice must set waitBetweenTries: 2000/,
+    'Mutation 8c (Transcribe Voice waitBetweenTries != 2000) must be rejected'
+  );
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      n.onError = 'stopWorkflow';
+      validateStructure(m, 'mutation-transcribe-onerror');
+    },
+    /Transcribe Voice must set onError: "continueRegularOutput"/,
+    'Mutation 8d (Transcribe Voice onError != continueRegularOutput) must be rejected'
   );
 
   return 7;

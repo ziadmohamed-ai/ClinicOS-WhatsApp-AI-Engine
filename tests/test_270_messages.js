@@ -2451,6 +2451,20 @@ addTest('Voice Pipeline Multi-Item Batch: non-zero voice index works across all 
     assert.strictEqual(reordered.messages[0].message_id, 'msg-voice-1');
     assert.strictEqual(reordered.messages[1].message_id, 'msg-text-0');
     assert.strictEqual(repArgs[1], 'أيوه أكد الحجز');
+
+    // H1: When Transcribe Voice fails after retries (e.g. error object or empty transcript),
+    // Save & Inject Transcript receives '' and Parse Turn & State tags the voice turn as [voice_unclear]
+    assert.strictEqual(txVoice.retryOnFail, true);
+    assert.strictEqual(txVoice.maxTries, 3);
+    assert.strictEqual(txVoice.waitBetweenTries, 2000);
+    assert.strictEqual(txVoice.onError, 'continueRegularOutput');
+    const failedRepArgs = evalExpr(saveTx.parameters.options.queryReplacement, { error: { message: 'OpenAI 503' }, text: 'should-not-use-error-text' });
+    assert.strictEqual(failedRepArgs[1], '');
+    const turnItems = fnParseTurn({ first: () => ({ json: { result: JSON.parse(failedRepArgs[0]) } }) });
+    const voiceItem = turnItems.find((it) => it.json.message_id === 'msg-voice-1');
+    assert.ok(voiceItem, 'Failed voice transcription must still produce a turn item');
+    assert.strictEqual(voiceItem.json.body, '[voice_unclear]');
+    assert.strictEqual(voiceItem.json.route, 'ai');
   }
 });
 
