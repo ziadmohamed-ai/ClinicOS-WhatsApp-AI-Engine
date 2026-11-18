@@ -18,7 +18,7 @@ Reject the PR immediately if any of the following fail:
 
 2. **Database Security & Trust Boundaries**
    - Every `SECURITY DEFINER` function must set `search_path = ''` and schema-qualify all object references.
-   - Production SQL functions (`public.*`, `l2v.*`, `private.*`) must **never** read session GUC backdoors (such as `current_setting('l2v.test_now', true)`) to override time or security checks; deterministic tests must pass timestamps via typed function parameters (`p_at timestamptz default now()`).
+   - Production SQL functions (`public.*`, `l2v.*`, `private.*`) must **never** read session GUC backdoors (such as `current_setting('l2v.test_now', true)`), and public runtime-callable functions (`l2v.assign_lead`, `l2v.set_qualification`, `l2v.release_overnight`, `l2v.escalate_overdue`) must **not** accept a `p_at` clock-override parameter (they must always use `now()`); deterministic time-travel tests must call ungranted internal helpers (`l2v._assign_lead_at`, `l2v._set_qualification_at`, `l2v._release_overnight_at`, `l2v._escalate_overdue_at`) that are not granted to `clinicos_api_owner`, `anon`, or `authenticated`.
    - `anon` and `authenticated` must have `REVOKE ALL` on `l2v` schema, tables, and functions.
    - `database/03_rls_policies.sql` must require `-v clinic_id=<uuid>` and fail closed if omitted or invalid.
 
