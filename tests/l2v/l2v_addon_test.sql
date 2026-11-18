@@ -940,6 +940,167 @@ begin
   raise notice 'T11 working hours (open/closed/boundary/Africa-Cairo/null), release_overnight idempotent, and kpi split: OK';
 end $$;
 
+-- ============================================================================
+-- 10b. T11 SLA across closing time:
+--      - Assigned at 17:55 with SLA 15 and closing at 18:00 (sla_due_at = 18:10,
+--        which passes while closed):
+--          * At 09:00 opening tick: NOT escalated; sla_due_at moved to 09:15
+--            (opening_time + sla_minutes) once, idempotently
+--          * Escalated after 09:15 (09:16 tick) if not acked
+--      - Acked assignment unaffected (status and sla_due_at unchanged, never escalated)
+--      - Null hours = old behaviour (sla_due_at not moved; escalates when due)
+-- ============================================================================
+do $$
+declare
+  v_clinic       uuid;
+  v_mgr          uuid;
+  v_rep1_c       uuid;
+  v_rep2_c       uuid;
+  v_rep1_id      uuid;
+  v_rep2_id      uuid;
+  v_p_pend       uuid;
+  v_p_acked      uuid;
+  v_p_null       uuid;
+  v_lead_pend    uuid;
+  v_lead_acked   uuid;
+  v_lead_null    uuid;
+  v_new          boolean;
+  v_q_pend       record;
+  v_q_acked      record;
+  v_q_null       record;
+  v_due_after    timestamptz;
+  v_acked_due    timestamptz;
+  v_null_due     timestamptz;
+  v_esc          integer;
+begin
+  --Ack any leftover pending assignments in other test clinics so global release_overnight/escalate_overdue only act on v_clinic
+  update l2v.assignments set status = 'acked', acked_at = now() where status = 'pending';
+
+  insert into public.clinics (name, timezone, settings)
+  values (
+    'T11 SLA Across Closing Clinic',
+    'Africa/Cairo',
+    '{"whatsapp_templates":{
+        "lead_handoff":{"name":"lead_handoff","language_codes":{"ar":"ar"}},
+        "sla_breach":{"name":"sla_breach","language_codes":{"ar":"ar"}},
+        "sla_breach_no_rep":{"name":"sla_breach_no_rep","language_codes":{"ar":"ar"}}}}'::jsonb
+  ) returning id into v_clinic;
+
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201066600001', 'MgrClose')  returning id into v_mgr;
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201066600002', 'RepClose1') returning id into v_rep1_c;
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201066600003', 'RepClose2') returning id into v_rep2_c;
+
+  insert into l2v.settings (clinic_id, sla_minutes, manager_contact_id, open_time, close_time, open_days)
+  values (v_clinic, 15, v_mgr, time '09:00:00', time '18:00:00', array[0,1,2,3,4,5,6]::smallint[]);
+
+  insert into l2v.reps (clinic_id, contact_id, name) values (v_clinic, v_rep1_c, 'RepClose1') returning id into v_rep1_id;
+  insert into l2v.reps (clinic_id, contact_id, name) values (v_clinic, v_rep2_c, 'RepClose2') returning id into v_rep2_id;
+
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600010', 'PatPending1755') returning id into v_p_pend;
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600011', 'PatAcked1755')   returning id into v_p_acked;
+
+  -- (1) Assign both leads at 17:55 Cairo time (5 minutes before 18:00 close, SLA = 15 -> sla_due_at = 18:10)
+  perform set_config('l2v.test_now', '2026-11-17 17:55:00+02', true);
+
+  select * into v_lead_pend, v_new from l2v.capture_lead(v_clinic, v_p_pend, 'click_to_whatsapp', 'camp_close', null, null, '2026-11-17 17:55:00+02'::timestamptz);
+  select * into v_q_pend from l2v.set_qualification(v_lead_pend, 'high', 'now', 'زراعة');
+  assert v_q_pend.status = 'hot' and v_q_pend.assignment_id is not null,
+    'T11 closing-SLA: lead at 17:55 (before 18:00 close) must be assigned immediately';
+
+  select * into v_lead_acked, v_new from l2v.capture_lead(v_clinic, v_p_acked, 'organic', null, null, null, '2026-11-17 17:55:00+02'::timestamptz);
+  select * into v_q_acked from l2v.set_qualification(v_lead_acked, 'high', 'now', 'تقويم');
+  assert v_q_acked.status = 'hot' and v_q_acked.assignment_id is not null,
+    'T11 closing-SLA: second lead at 17:55 must be assigned immediately';
+
+  -- Ensure exact 17:55 assigned_at and 18:10 sla_due_at timestamps on both assignments
+  update l2v.assignments
+     set assigned_at = '2026-11-17 17:55:00+02'::timestamptz,
+         sla_due_at  = '2026-11-17 18:10:00+02'::timestamptz
+   where id in (v_q_pend.assignment_id, v_q_acked.assignment_id);
+
+  -- Second assignment is acked before closing (17:58)
+  update l2v.assignments
+     set status   = 'acked',
+         acked_at = '2026-11-17 17:58:00+02'::timestamptz
+   where id = v_q_acked.assignment_id;
+
+  -- (2) Next morning at 09:00 opening tick:
+  --     Pending assignment's sla_due_at (18:10 yesterday, which passed while closed)
+  --     must be moved to 09:15 today (opening_time + 15m) once, idempotently,
+  --     and must NOT be escalated at the 09:00 tick!
+  perform set_config('l2v.test_now', '2026-11-18 09:00:00+02', true);
+
+  perform l2v.release_overnight();
+  v_esc := l2v.escalate_overdue();
+  assert v_esc = 0,
+    'T11 closing-SLA: pending assignment from 17:55 (SLA 15, close 18:00) must NOT be escalated at 09:00 tick, got ' || v_esc;
+
+  select sla_due_at into v_due_after from l2v.assignments where id = v_q_pend.assignment_id;
+  assert v_due_after = '2026-11-18 09:15:00+02'::timestamptz,
+    'T11 closing-SLA: expected pending sla_due_at moved to 2026-11-18 09:15:00+02 (opening_time + 15m), got ' || v_due_after;
+  assert (select status from l2v.assignments where id = v_q_pend.assignment_id) = 'pending',
+    'T11 closing-SLA: assignment must remain pending at 09:00 tick';
+
+  -- Idempotency check at 09:05 tick: release_overnight() must not change sla_due_at again, and escalate_overdue() still 0
+  perform set_config('l2v.test_now', '2026-11-18 09:05:00+02', true);
+  perform l2v.release_overnight();
+  assert (select sla_due_at from l2v.assignments where id = v_q_pend.assignment_id) = '2026-11-18 09:15:00+02'::timestamptz,
+    'T11 closing-SLA: moving sla_due_at to opening_time + sla_minutes must be idempotent';
+  assert l2v.escalate_overdue() = 0,
+    'T11 closing-SLA: pending assignment must not be escalated before 09:15 (at 09:05 tick)';
+
+  -- Acked assignment check: completely unaffected (status = acked, sla_due_at unchanged at yesterday 18:10)
+  select sla_due_at into v_acked_due from l2v.assignments where id = v_q_acked.assignment_id;
+  assert (select status from l2v.assignments where id = v_q_acked.assignment_id) = 'acked',
+    'T11 closing-SLA: acked assignment status must remain acked';
+  assert v_acked_due = '2026-11-17 18:10:00+02'::timestamptz,
+    'T11 closing-SLA: acked assignment sla_due_at must be unaffected, got ' || v_acked_due;
+
+  -- (3) After 09:15 (09:16 tick): if still not acked, it MUST be escalated now!
+  perform set_config('l2v.test_now', '2026-11-18 09:16:00+02', true);
+  perform l2v.release_overnight();
+  v_esc := l2v.escalate_overdue();
+  assert v_esc = 1,
+    'T11 closing-SLA: unacked assignment must be escalated after 09:15 (at 09:16 tick), got ' || v_esc;
+  assert (select status from l2v.assignments where id = v_q_pend.assignment_id) = 'escalated',
+    'T11 closing-SLA: first assignment must be marked escalated after 09:15';
+  assert (select count(*) from l2v.assignments where lead_id = v_lead_pend and status = 'pending' and rep_id = v_rep2_id) = 1,
+    'T11 closing-SLA: lead must be reassigned to second rep after 09:15 escalation';
+  assert (select status from l2v.assignments where id = v_q_acked.assignment_id) = 'acked',
+    'T11 closing-SLA: acked assignment must still remain acked after 09:15 tick';
+
+  -- Clean up the reassigned pending row before testing null hours
+  update l2v.assignments set status = 'acked', acked_at = '2026-11-18 09:17:00+02'::timestamptz where lead_id = v_lead_pend and status = 'pending';
+
+  -- (4) Null hours = old behaviour (sla_due_at is NOT moved; escalates immediately when due)
+  update l2v.settings
+     set open_time  = null,
+         close_time = null,
+         open_days  = null
+   where clinic_id = v_clinic;
+
+  insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600012', 'PatNullHours') returning id into v_p_null;
+  perform set_config('l2v.test_now', '2026-11-18 17:55:00+02', true);
+  select * into v_lead_null, v_new from l2v.capture_lead(v_clinic, v_p_null, 'organic', null, null, null, '2026-11-18 17:55:00+02'::timestamptz);
+  select * into v_q_null from l2v.set_qualification(v_lead_null, 'high', 'now', 'حشو');
+  update l2v.assignments
+     set assigned_at = '2026-11-18 17:55:00+02'::timestamptz,
+         sla_due_at  = '2026-11-18 18:10:00+02'::timestamptz
+   where id = v_q_null.assignment_id;
+
+  perform set_config('l2v.test_now', '2026-11-19 09:00:00+02', true);
+  perform l2v.release_overnight();
+  select sla_due_at into v_null_due from l2v.assignments where id = v_q_null.assignment_id;
+  assert v_null_due = '2026-11-18 18:10:00+02'::timestamptz,
+    'T11 closing-SLA: null hours must preserve old behaviour (sla_due_at not moved)';
+  v_esc := l2v.escalate_overdue();
+  assert v_esc = 1,
+    'T11 closing-SLA: null hours overdue assignment must escalate immediately (old behaviour), got ' || v_esc;
+
+  perform set_config('l2v.test_now', '', true);
+  raise notice 'T11 SLA across closing time (17:55 -> 09:00 not escalated -> 09:15+ escalated, acked unaffected, null hours old behaviour): OK';
+end $$;
+
 set role anon;
 do $$ begin
   begin perform l2v.release_overnight(); raise exception 'anon called release_overnight';

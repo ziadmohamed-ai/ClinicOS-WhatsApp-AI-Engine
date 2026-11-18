@@ -115,7 +115,7 @@ fi
 
 run_pg() {
   if [ "$IS_WIN" -eq 0 ] && [ "$(id -u)" = 0 ]; then
-    su postgres -s /bin/"${BASH:-sh}" -c "$1"
+    su postgres -s "$(command -v bash)" -c "$1"
   else
     "${BASH:-sh}" -c "$1"
   fi
