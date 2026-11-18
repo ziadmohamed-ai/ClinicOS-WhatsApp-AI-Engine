@@ -435,6 +435,28 @@ function buildDashboardApiWorkflow() {
   const formatJs = fs.readFileSync(DASH_FORMAT_NODE_PATH, 'utf8').replace(/\r\n/g, '\n');
   const pgCredentials = JSON.parse(JSON.stringify(refPgNode.credentials));
   const pgTypeVersion = refPgNode.typeVersion;
+  const corsOriginExpr =
+    '={{ ($env.CLINICOS_DASHBOARD_ORIGIN && $env.CLINICOS_DASHBOARD_ORIGIN.trim() !== "*" && !/,/.test($env.CLINICOS_DASHBOARD_ORIGIN)) ? $env.CLINICOS_DASHBOARD_ORIGIN.trim() : "YOUR_DASHBOARD_ALLOWED_ORIGIN" }}';
+  const corsResponseHeaders = {
+    entries: [
+      {
+        name: 'Access-Control-Allow-Origin',
+        value: corsOriginExpr,
+      },
+      {
+        name: 'Access-Control-Allow-Methods',
+        value: 'GET, OPTIONS',
+      },
+      {
+        name: 'Access-Control-Allow-Headers',
+        value: 'x-dashboard-token, Content-Type',
+      },
+      {
+        name: 'Vary',
+        value: 'Origin',
+      },
+    ],
+  };
 
   const nodes = [
     {
@@ -443,7 +465,9 @@ function buildDashboardApiWorkflow() {
         path: 'clinicos/dashboard',
         authentication: 'headerAuth',
         responseMode: 'responseNode',
-        options: {},
+        options: {
+          allowedOrigins: corsOriginExpr,
+        },
       },
       id: 'c1b2c3d4-0001-4000-8000-000000000001',
       name: 'Dashboard Webhook',
@@ -534,6 +558,7 @@ function buildDashboardApiWorkflow() {
         responseBody: '={{ $json }}',
         options: {
           responseCode: 200,
+          responseHeaders: JSON.parse(JSON.stringify(corsResponseHeaders)),
         },
       },
       id: 'c1b2c3d4-0006-4000-8000-000000000006',
@@ -548,6 +573,7 @@ function buildDashboardApiWorkflow() {
         responseBody: "={{ ({ ok: false, error: $json.error || 'bad_request' }) }}",
         options: {
           responseCode: 400,
+          responseHeaders: JSON.parse(JSON.stringify(corsResponseHeaders)),
         },
       },
       id: 'c1b2c3d4-0007-4000-8000-000000000007',
