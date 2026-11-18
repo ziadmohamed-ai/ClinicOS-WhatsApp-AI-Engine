@@ -469,7 +469,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const first = $input.first()?.json ?? {};\nconst result = first.result && typeof first.result === \"object\" ? first.result : {};\nif (result.ok !== true || !Array.isArray(result.messages)) {\n  return [];\n}\n\nconst actionable = result.messages.filter(\n  (m) =>\n    m &&\n    typeof m === \"object\" &&\n    m.opted_out !== true &&\n    !m.opt_out_scope &&\n    m.conversation_status !== \"human\"\n);\n\nreturn actionable.map((event) => {\n  const lang = event.language === \"en\" ? \"en\" : \"ar\";\n  const state = event.conversation_state && typeof event.conversation_state === \"object\" ? event.conversation_state : {};\n  const pending = state.pending_booking && typeof state.pending_booking === \"object\" ? state.pending_booking : null;\n  const rawText = String(event.body ?? \"\").trim();\n  const msgKey = String(event.provider_message_id ?? event.message_id ?? \"\");\n  const mType = String(event.message_type ?? \"text\").toLowerCase();\n  const isVoice = mType === \"audio\" || mType === \"voice\";\n\n  // Non-text messages (location, files, a voice note we could not transcribe) are no longer answered\n  // with a canned sentence. They go to the AI as a neutral tag so it answers from clinic_snapshot,\n  // in the patient's own dialect.\n  const nonTextTag = rawText\n    ? null\n    : isVoice\n      ? \"[voice_unclear]\"\n      : mType === \"location\"\n        ? \"[location]\"\n        : [\"image\", \"document\", \"video\", \"sticker\"].includes(mType)\n          ? \"[\" + mType + \"]\"\n          : \"[empty]\";\n\n  const expiry = pending ? Date.parse(String(pending.expires_at ?? \"\")) : NaN;\n  const cleanState = (pending && (!Number.isFinite(expiry) || expiry < Date.now()))\n    ? { ...state, pending_booking: null }\n    : state;\n\n  return {\n    json: {\n      ...event,\n      conversation_state: cleanState,\n      provider_message_id: msgKey,\n      ...(nonTextTag ? { body: nonTextTag } : {}),\n      route: \"ai\",\n    },\n  };\n});"
+        "jsCode": "const first = $input.first()?.json ?? {};\nlet fallbackResult = null;\nif (!first.result || typeof first.result !== \"object\") {\n  try {\n    if (typeof $ === \"function\") {\n      fallbackResult = $(\"Verify & Save Event\").first()?.json?.result ?? null;\n    }\n  } catch {\n    fallbackResult = null;\n  }\n}\nconst result =\n  first.result && typeof first.result === \"object\"\n    ? first.result\n    : fallbackResult && typeof fallbackResult === \"object\"\n      ? fallbackResult\n      : {};\nif (result.ok !== true || !Array.isArray(result.messages)) {\n  return [];\n}\n\nconst actionable = result.messages.filter(\n  (m) =>\n    m &&\n    typeof m === \"object\" &&\n    m.opted_out !== true &&\n    !m.opt_out_scope &&\n    m.conversation_status !== \"human\"\n);\n\nreturn actionable.map((event) => {\n  const lang = event.language === \"en\" ? \"en\" : \"ar\";\n  const state = event.conversation_state && typeof event.conversation_state === \"object\" ? event.conversation_state : {};\n  const pending = state.pending_booking && typeof state.pending_booking === \"object\" ? state.pending_booking : null;\n  const rawText = String(event.body ?? \"\").trim();\n  const msgKey = String(event.provider_message_id ?? event.message_id ?? \"\");\n  const mType = String(event.message_type ?? \"text\").toLowerCase();\n  const isVoice = mType === \"audio\" || mType === \"voice\";\n\n  // Non-text messages (location, files, a voice note we could not transcribe) are no longer answered\n  // with a canned sentence. They go to the AI as a neutral tag so it answers from clinic_snapshot,\n  // in the patient's own dialect.\n  const nonTextTag = rawText\n    ? null\n    : isVoice\n      ? \"[voice_unclear]\"\n      : mType === \"location\"\n        ? \"[location]\"\n        : [\"image\", \"document\", \"video\", \"sticker\"].includes(mType)\n          ? \"[\" + mType + \"]\"\n          : \"[empty]\";\n\n  const expiry = pending ? Date.parse(String(pending.expires_at ?? \"\")) : NaN;\n  const cleanState = (pending && (!Number.isFinite(expiry) || expiry < Date.now()))\n    ? { ...state, pending_booking: null }\n    : state;\n\n  return {\n    json: {\n      ...event,\n      conversation_state: cleanState,\n      provider_message_id: msgKey,\n      ...(nonTextTag ? { body: nonTextTag } : {}),\n      route: \"ai\",\n    },\n  };\n});"
       },
       "id": "48c1fbf8-19b5-4cdb-bee7-a2bb5eab6e05",
       "name": "Parse Turn & State",
@@ -1044,7 +1044,7 @@
         "query": "SELECT public.apply_voice_transcription($1::jsonb, $2::text) AS result;",
         "options": {
           "queryBatching": "single",
-          "queryReplacement": "={{ (() => { const res = $('Verify & Save Event').first().json.result; const msgs = Array.isArray(res?.messages) ? res.messages : []; const vi = msgs.findIndex((m) => m && m.conversation_status !== 'human' && (m.message_type === 'audio' || m.message_type === 'voice') && m.opted_out !== true && !m.opt_out_scope && (m.payload?.audio?.id || m.payload?.voice?.id)); const payload = vi > 0 ? { ...res, messages: [msgs[vi], ...msgs.slice(0, vi), ...msgs.slice(vi + 1)] } : res; return [JSON.stringify(payload), String($json.text ?? '')]; })() }}"
+          "queryReplacement": "={{ (() => { const res = $('Verify & Save Event').first().json.result; const msgs = Array.isArray(res?.messages) ? res.messages : []; const vi = msgs.findIndex((m) => m && m.conversation_status !== 'human' && (m.message_type === 'audio' || m.message_type === 'voice') && m.opted_out !== true && !m.opt_out_scope && (m.payload?.audio?.id || m.payload?.voice?.id)); const payload = vi > 0 ? { ...res, messages: [msgs[vi], ...msgs.slice(0, vi), ...msgs.slice(vi + 1)] } : res; const tx = !($json && $json.error) && typeof $json?.text === 'string' ? $json.text : ''; return [JSON.stringify(payload), tx]; })() }}"
         }
       },
       "id": "v2a10001-0001-4000-a001-000000000005",
@@ -1063,7 +1063,8 @@
           "id": "YOUR_POSTGRES_CREDENTIAL_ID",
           "name": "ClinicOS Runtime PostgreSQL"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -1122,7 +1123,10 @@
           "id": "YOUR_OPENAI_CREDENTIAL_ID",
           "name": "OpenAI account"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {},

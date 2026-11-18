@@ -1,5 +1,20 @@
 const first = $input.first()?.json ?? {};
-const result = first.result && typeof first.result === "object" ? first.result : {};
+let fallbackResult = null;
+if (!first.result || typeof first.result !== "object") {
+  try {
+    if (typeof $ === "function") {
+      fallbackResult = $("Verify & Save Event").first()?.json?.result ?? null;
+    }
+  } catch {
+    fallbackResult = null;
+  }
+}
+const result =
+  first.result && typeof first.result === "object"
+    ? first.result
+    : fallbackResult && typeof fallbackResult === "object"
+      ? fallbackResult
+      : {};
 if (result.ok !== true || !Array.isArray(result.messages)) {
   return [];
 }
