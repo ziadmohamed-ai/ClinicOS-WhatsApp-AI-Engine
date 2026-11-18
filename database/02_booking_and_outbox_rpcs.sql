@@ -1850,7 +1850,7 @@ AS $function$
     'parking', c.settings ->> 'parking',
     'payment_methods', coalesce(c.settings -> 'payment_methods', '[]'::jsonb),
     'installments_available', coalesce((c.settings ->> 'installments_available')::boolean, false),
-    'emergency_number', coalesce(c.settings ->> 'emergency_number', '997'),
+    'emergency_number', nullif(btrim(c.settings ->> 'emergency_number'), ''),  -- NULL when not configured: never guess a number
     'services', coalesce((
       SELECT jsonb_agg(jsonb_build_object(
                'id', s.id, 'code', s.code, 'name_ar', s.name_ar, 'name_en', s.name_en,
