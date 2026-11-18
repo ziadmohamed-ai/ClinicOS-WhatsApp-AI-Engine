@@ -2591,13 +2591,13 @@ addTest('T10 Dashboard API: Format Dashboard Response masks phones (all but last
   assert.strictEqual(out.kpi_daily[0].leads_organic, 2);
 });
 
-addTest('T10 Dashboard API Validator Mutations: rejects all 8 workflow security/contract mutations in memory', 'Lead-to-Visit', () => {
+addTest('T10 Dashboard API Validator Mutations: rejects all 10 workflow security/contract mutations in memory', 'Lead-to-Visit', () => {
   const path = require('path');
   const { validateStructure, validateDashboardApiContract, runDashboardApiMutationTests } = require('./validate_workflow.js');
   const origWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-main-engine.json'));
   const dashWf = validateStructure(path.join(__dirname, '..', 'workflow', 'clinicos-dashboard-api.json'));
   validateDashboardApiContract(origWf, dashWf);
-  assert.strictEqual(runDashboardApiMutationTests(origWf, dashWf), 8);
+  assert.strictEqual(runDashboardApiMutationTests(origWf, dashWf), 10);
 });
 
 addTest('T11 SLA Tick Validator Mutations: enforces release_overnight() + escalate_overdue() query and all 11 SLA Tick mutations', 'Lead-to-Visit', () => {
@@ -2686,8 +2686,8 @@ addTest('T10 Dashboard UI: shows DEMO DATA banner when unconfigured or on API fa
       const sb = { Intl, Date, Promise, setTimeout, encodeURIComponent, CLINICOS_DASHBOARD_CONFIG: cfg, fetch: fetchFn, document: { getElementById: getEl, querySelectorAll: () => [], createElement: () => ({ className: '', textContent: '', innerHTML: '', appendChild() {} }) } };
       sb.globalThis = sb;
       vm.createContext(sb);
-      vm.runInContext(inlineScript + '\\n;globalThis.__load = loadLiveDashboard;', sb);
-      return { getEl, load: () => sb.__load() };
+      vm.runInContext(inlineScript + '\\n;globalThis.__load = loadLiveDashboard; globalThis.__connect = connectOperatorDashboard;', sb);
+      return { getEl, load: () => sb.__load(), connect: (u, t) => sb.__connect(u, t) };
     }
     (async () => {
       const okEnv = makeEnv(
@@ -2711,6 +2711,28 @@ addTest('T10 Dashboard UI: shows DEMO DATA banner when unconfigured or on API fa
       assert.strictEqual(okEnv.getEl('kpiL2vBooked').textContent, '2');
       assert.ok(!okEnv.getEl('l2vLeadsBody').innerHTML.includes('<img'), 'XSS tag must be escaped in l2vLeadsBody');
       assert.ok(okEnv.getEl('l2vLeadsBody').innerHTML.includes('&lt;img src=x onerror=alert(1)&gt;'));
+
+      // Operator runtime token connection (holds token in memory only and clears password input field)
+      const opEnv = makeEnv(
+        undefined,
+        async () => ({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            from: '2026-10-19',
+            to: '2026-11-17',
+            kpi_daily: [{ day: '2026-11-17', leads: 4, hot_leads: 2, booked_leads: 1, escalations: 0 }],
+            leads: []
+          })
+        })
+      );
+      opEnv.getEl('operatorApiUrlInput').value = 'http://127.0.0.1:59999/webhook/clinicos/dashboard';
+      opEnv.getEl('operatorApiTokenInput').value = 'RUNTIME_OPERATOR_READONLY_TOKEN';
+      assert.strictEqual(await opEnv.connect(), true);
+      assert.strictEqual(opEnv.getEl('operatorApiTokenInput').value, '', 'Password input value must be cleared after reading into memory');
+      assert.strictEqual(opEnv.getEl('demoDataBanner').classList.has('hidden'), true);
+      assert.strictEqual(opEnv.getEl('kpiL2vLeads').textContent, '4');
 
       const failEnv = makeEnv(
         { apiUrl: 'http://127.0.0.1:59999/webhook/clinicos/dashboard', apiToken: 'SYNTHETIC_PLACEHOLDER_TEST' },
