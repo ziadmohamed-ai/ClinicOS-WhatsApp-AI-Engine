@@ -2789,6 +2789,52 @@ addTest('Security Hardening: database/05_lead_engine.sql has no l2v.test_now bac
   assert.ok(fs.existsSync(reviewerPath), '.agents/agents/reviewer.md must exist');
 });
 
+addTest('H2 AI Failure Path: broken JSON, empty output, onError object, and unknown intent send code fallback reply and set needs_human=true', 'Adversarial & Safety', () => {
+  const failurePayloads = [
+    { label: 'broken JSON', aiOutput: { output: '{broken json: "missing brace"' } },
+    { label: 'non-JSON error string', aiOutput: { output: 'Rate limit exceeded from upstream LLM' } },
+    { label: 'empty output object', aiOutput: {} },
+    { label: 'empty output string', aiOutput: { output: '   ' } },
+    { label: 'onError node error object', aiOutput: { error: { message: 'OpenAI 502 Bad Gateway' } } },
+    { label: 'unknown intent', aiOutput: { intent: 'hallucinated_intent', reply_text: 'AI hallucinated reply' } },
+  ];
+
+  for (const fc of failurePayloads) {
+    // Arabic (ar-EG) patient
+    const arRes = runPipelineTurn({
+      inboundText: 'بكام جلسة التنظيف؟',
+      patientProfile: { preferred_dialect: 'ar-EG' },
+      aiOutput: fc.aiOutput,
+    });
+    assert.strictEqual(arRes.parsed.needs_human, true, `Expected needs_human=true for ${fc.label} (ar-EG)`);
+    assert.strictEqual(arRes.parsed.should_update, true, `Expected should_update=true for ${fc.label} (ar-EG)`);
+    assert.strictEqual(arRes.parsed.target_status, 'human', `Expected target_status='human' for ${fc.label} (ar-EG)`);
+    assert.strictEqual(arRes.parsed.intent, 'faq', `Expected intent='faq' for ${fc.label} (ar-EG)`);
+    assert.strictEqual(arRes.parsed.lead_timing, null);
+    assert.strictEqual(arRes.parsed.lead_budget_band, null);
+    assert.ok(
+      arRes.parsed.reply_text && /فريق|العيادة/.test(arRes.parsed.reply_text) && !arRes.parsed.reply_text.includes('AI hallucinated reply') && !arRes.parsed.reply_text.includes('Rate limit'),
+      `Expected fixed Arabic fallback reply for ${fc.label}, got: ${arRes.parsed.reply_text}`
+    );
+
+    // English patient
+    const enRes = runPipelineTurn({
+      inboundText: 'How much is a dental checkup?',
+      language: 'en',
+      patientProfile: { preferred_dialect: 'en' },
+      aiOutput: fc.aiOutput,
+    });
+    assert.strictEqual(enRes.parsed.needs_human, true, `Expected needs_human=true for ${fc.label} (en)`);
+    assert.strictEqual(enRes.parsed.should_update, true, `Expected should_update=true for ${fc.label} (en)`);
+    assert.strictEqual(enRes.parsed.target_status, 'human', `Expected target_status='human' for ${fc.label} (en)`);
+    assert.strictEqual(enRes.parsed.intent, 'faq', `Expected intent='faq' for ${fc.label} (en)`);
+    assert.ok(
+      enRes.parsed.reply_text && /clinic|team/i.test(enRes.parsed.reply_text) && !enRes.parsed.reply_text.includes('AI hallucinated reply') && !enRes.parsed.reply_text.includes('Rate limit'),
+      `Expected fixed English fallback reply for ${fc.label}, got: ${enRes.parsed.reply_text}`
+    );
+  }
+});
+
 // ============================================================================
 // EXECUTE ALL 270 TESTS & REPORT SUMMARY
 // ============================================================================

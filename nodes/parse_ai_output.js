@@ -1,5 +1,5 @@
 function extractAiJson(raw) {
-  if (!raw || typeof raw !== "object") return {};
+  if (!raw || typeof raw !== "object" || raw.error) return {};
   if (typeof raw.intent === "string") return raw;
   const candidates = [
     raw.output,
@@ -26,19 +26,6 @@ function extractAiJson(raw) {
             if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
           } catch {}
         }
-      }
-      if (cleaned.length > 0 && !cleaned.startsWith("{")) {
-        return {
-          intent: "faq",
-          language: /[\u0600-\u06FF]/.test(cleaned) ? "ar" : "en",
-          reply_text: cleaned,
-          confidence: 0.9,
-          service_code: null,
-          requested_from: null,
-          requested_to: null,
-          selected_slot_index: null,
-          needs_human: false,
-        };
       }
     } else if (typeof c === "object" && !Array.isArray(c) && typeof c.intent === "string") {
       return c;
@@ -382,6 +369,11 @@ const allowed = new Set([
   "medical_question",
 ]);
 
+const isAiFailure =
+  Boolean($json?.error) ||
+  typeof parsed.intent !== "string" ||
+  !allowed.has(parsed.intent);
+
 let intent = isHardEmergency
   ? "emergency"
   : isHardHandoff
@@ -390,18 +382,65 @@ let intent = isHardEmergency
       ? "medical_question"
       : isPromptInjection
         ? "clarify"
-        : (allowed.has(parsed.intent) ? parsed.intent : "faq");
+        : isAiFailure
+          ? "faq"
+          : parsed.intent;
 
 const c = Number(parsed.confidence);
 let confidence = Number.isFinite(c) ? Math.max(0, Math.min(1, c)) : 0.9;
 if (isHardEmergency || isHardHandoff || isHardMedical) confidence = 1.0;
 
-if (confidence < 0.45 && intent !== "emergency" && intent !== "human_handoff" && intent !== "medical_question") {
+if (!isAiFailure && confidence < 0.45 && intent !== "emergency" && intent !== "human_handoff" && intent !== "medical_question") {
   intent = "clarify";
 }
 
-const language = parsed.language === "en" || (/^[a-z0-9\s.,?!'"-]+$/i.test(normMsg) && /[a-z]{3,}/i.test(normMsg)) ? "en" : "ar";
-const dialect = detectDialect(normMsg, language, parsed.dialect || patientProfile.preferred_dialect);
+const language =
+  (!isAiFailure && parsed.language === "en") ||
+  event.language === "en" ||
+  (/^[a-z0-9\s.,?!'"-]+$/i.test(normMsg) && /[a-z]{3,}/i.test(normMsg))
+    ? "en"
+    : "ar";
+const dialect = detectDialect(normMsg, language, (!isAiFailure ? parsed.dialect : null) || patientProfile.preferred_dialect);
+
+if (isAiFailure && !isHardEmergency && !isPromptInjection) {
+  const aiFailureReply =
+    language === "en"
+      ? "I received your message and forwarded it to our clinic reception team so they can assist you shortly."
+      : dialect === "ar-SA"
+        ? "وصلت رسالتك طال عمرك، وحولتها لفريق استقبال العيادة عشان يتواصلون معك ويساعدونك في أقرب وقت"
+        : "وصلت رسالتك يا فندم، وحولتها لفريق استقبال العيادة وهيتواصلوا معاك في أقرب وقت";
+  return {
+    json: {
+      ...event,
+      clinic_timezone: zone,
+      intent: "faq",
+      confidence: 0,
+      language,
+      dialect,
+      needs_human: true,
+      should_query_slots: false,
+      should_cancel_appointment: false,
+      should_confirm_booking: false,
+      is_reschedule: false,
+      target_appointment_id: null,
+      service_id: null,
+      service_code: null,
+      service_name_ar: null,
+      service_name_en: null,
+      provider_id: null,
+      requested_from: null,
+      requested_to: null,
+      slot_closing_text: null,
+      should_update: true,
+      target_status: "human",
+      state_patch: { pending_booking: null },
+      patient_profile_patch: { preferred_dialect: dialect },
+      lead_timing: null,
+      lead_budget_band: null,
+      reply_text: aiFailureReply,
+    },
+  };
+}
 
 let rawReply = typeof parsed.reply_text === "string" ? parsed.reply_text.trim().slice(0, 3500) : "";
 if (isPromptInjection) {
