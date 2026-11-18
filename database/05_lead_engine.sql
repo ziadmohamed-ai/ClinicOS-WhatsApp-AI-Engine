@@ -435,21 +435,18 @@ $$;
 -- Returns the assignment id, or null when no eligible rep is left.
 create function l2v.assign_lead(
   p_lead_id         uuid,
-  p_exclude_rep_ids uuid[] default '{}',
-  p_at              timestamptz default now()
+  p_exclude_rep_ids uuid[] default '{}'
 )
 returns uuid
 language sql
 security definer
 set search_path = ''
 as $$
-  select l2v._assign_lead_at(p_lead_id, p_exclude_rep_ids, coalesce(p_at, now()), coalesce(p_at, now()));
+  select l2v._assign_lead_at(p_lead_id, p_exclude_rep_ids, now(), now());
 $$;
 
--- Deterministic scoring. Hot (>= 70) leads are assigned immediately when the clinic is open;
--- when closed, a new hot lead stays hot and unassigned until l2v.release_overnight() runs.
--- score = timing points + budget points; hot >= 70, warm 30..69, cold < 30.
-create function l2v.set_qualification(
+-- Internal time-parameterized qualification helper (for tests and internal calls; not granted to runtime role).
+create function l2v._set_qualification_at(
   p_lead_id     uuid,
   p_budget_band text,
   p_timing      text,
@@ -491,7 +488,7 @@ begin
   if v_status = 'hot' then
     if not exists (select 1 from l2v.assignments a where a.lead_id = p_lead_id) then
       if l2v.is_clinic_open(v_clinic_id, v_now) then
-        v_assign := l2v.assign_lead(p_lead_id, '{}'::uuid[], v_now);
+        v_assign := l2v._assign_lead_at(p_lead_id, '{}'::uuid[], v_now, v_now);
       else
         v_assign := null;
       end if;
@@ -505,6 +502,23 @@ begin
 
   return query select v_status, v_score::smallint, v_assign;
 end;
+$$;
+
+-- Deterministic scoring. Hot (>= 70) leads are assigned immediately when the clinic is open;
+-- when closed, a new hot lead stays hot and unassigned until l2v.release_overnight() runs.
+-- score = timing points + budget points; hot >= 70, warm 30..69, cold < 30.
+create function l2v.set_qualification(
+  p_lead_id     uuid,
+  p_budget_band text,
+  p_timing      text,
+  p_treatment   text default null
+)
+returns table (status text, score smallint, assignment_id uuid)
+language sql
+security definer
+set search_path = ''
+as $$
+  select * from l2v._set_qualification_at(p_lead_id, p_budget_band, p_timing, p_treatment, now());
 $$;
 
 -- Qualify by contact_id: finds the contact's open lead in this clinic and calls
@@ -622,11 +636,8 @@ begin
 end;
 $$;
 
--- Once the clinic is open, moves any pending assignments whose sla_due_at passed
--- while the clinic was closed to opening_time + sla_minutes (once, idempotent),
--- and assigns all unassigned hot leads in round-robin order with SLA starting at
--- the clinic's opening time (idempotent; skips closed clinics and leads whose patient already booked).
-create function l2v.release_overnight(p_at timestamptz default now())
+-- Internal time-parameterized overnight release helper (for tests; not granted to runtime role).
+create function l2v._release_overnight_at(p_at timestamptz default now())
 returns integer
 language plpgsql
 security definer
@@ -723,11 +734,21 @@ begin
 end;
 $$;
 
--- Run every minute from n8n. Closes assignments whose patient already booked,
--- ensures pending assignments whose sla_due_at passed while closed are moved to
--- opening_time + sla_minutes, then (while the clinic is open) moves overdue ones
--- to the next rep and alerts the manager. Returns the number of escalated assignments.
-create function l2v.escalate_overdue(p_at timestamptz default now())
+-- Once the clinic is open, moves any pending assignments whose sla_due_at passed
+-- while the clinic was closed to opening_time + sla_minutes (once, idempotent),
+-- and assigns all unassigned hot leads in round-robin order with SLA starting at
+-- the clinic's opening time (idempotent; skips closed clinics and leads whose patient already booked).
+create function l2v.release_overnight()
+returns integer
+language sql
+security definer
+set search_path = ''
+as $$
+  select l2v._release_overnight_at(now());
+$$;
+
+-- Internal time-parameterized SLA escalation helper (for tests; not granted to runtime role).
+create function l2v._escalate_overdue_at(p_at timestamptz default now())
 returns integer
 language plpgsql
 security definer
@@ -809,9 +830,10 @@ begin
   loop
     update l2v.assignments set status = 'escalated', escalated_at = v_now where id = r.id;
 
-    v_new := l2v.assign_lead(
+    v_new := l2v._assign_lead_at(
       r.lead_id,
       array(select x.rep_id from l2v.assignments x where x.lead_id = r.lead_id),
+      v_now,
       v_now
     );
 
@@ -848,6 +870,19 @@ begin
 
   return v_count;
 end;
+$$;
+
+-- Run every minute from n8n. Closes assignments whose patient already booked,
+-- ensures pending assignments whose sla_due_at passed while closed are moved to
+-- opening_time + sla_minutes, then (while the clinic is open) moves overdue ones
+-- to the next rep and alerts the manager. Returns the number of escalated assignments.
+create function l2v.escalate_overdue()
+returns integer
+language sql
+security definer
+set search_path = ''
+as $$
+  select l2v._escalate_overdue_at(now());
 $$;
 
 -- Daily KPIs for the clinic report (clinic timezone).
@@ -1029,18 +1064,19 @@ begin
   foreach v_role in array array['clinicos_api_owner', 'service_role'] loop
     if exists (select 1 from pg_roles where rolname = v_role) then
       execute format('grant usage on schema l2v to %I', v_role);
+      execute format('revoke all on all functions in schema l2v from %I', v_role);
       execute format('grant execute on function
         l2v.is_staff(uuid, text),
         l2v.is_clinic_open(uuid, timestamptz),
         l2v.capture_lead(uuid, uuid, text, text, text, jsonb, timestamptz),
         l2v.capture_lead_guarded(uuid, uuid, text, text, jsonb, timestamptz),
-        l2v.assign_lead(uuid, uuid[], timestamptz),
-        l2v.set_qualification(uuid, text, text, text, timestamptz),
+        l2v.assign_lead(uuid, uuid[]),
+        l2v.set_qualification(uuid, text, text, text),
         l2v.qualify_contact(uuid, uuid, text, text, text),
         l2v.rep_ack(uuid, text),
         l2v.close_lead(uuid, uuid),
-        l2v.release_overnight(timestamptz),
-        l2v.escalate_overdue(timestamptz),
+        l2v.release_overnight(),
+        l2v.escalate_overdue(),
         l2v.kpi_daily(uuid, date, date),
         l2v.recent_leads(uuid, integer)
         to %I', v_role);

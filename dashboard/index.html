@@ -37,11 +37,32 @@
   <div id="demoDataBanner" role="status" class="bg-amber-500/15 border-2 border-amber-500/60 text-amber-800 rounded-xl px-4 py-2.5 mb-3 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold">
     <div>
       <span>⚠️ DEMO DATA — </span>
-      <span id="demoDataReason">البيانات المعروضة حالياً تجريبية (Static Mock). لعرض أرقام العيادة الحقيقية اضبط رابط وتوكن ClinicOS Dashboard API في الكائن DASHBOARD_CONFIG أعلى الصفحة.</span>
+      <span id="demoDataReason">البيانات المعروضة حالياً تجريبية (Static Mock). لعرض أرقام العيادة الحقيقية أدخل رابط وتوكن القراءة فقط عند فتح الصفحة (يُحفظ في ذاكرة التبويب المؤقتة فقط ولا يُخزّن في الملف).</span>
     </div>
-    <button onclick="loadLiveDashboard()" class="px-2.5 py-1 rounded-lg bg-[var(--card)] border border-amber-500/40 text-amber-700 hover:bg-amber-500/10 transition cursor-pointer">
-      🔄 إعادة المحاولة
-    </button>
+    <div class="flex flex-wrap items-center gap-1.5">
+      <input
+        id="operatorApiUrlInput"
+        type="url"
+        dir="ltr"
+        autocomplete="off"
+        placeholder="https://<n8n-host>/webhook/clinicos/dashboard"
+        class="px-2.5 py-1 rounded-lg bg-[var(--card)] border border-amber-500/40 text-[var(--foreground)] text-xs font-mono w-56 focus:outline-none focus:border-amber-600"
+      />
+      <input
+        id="operatorApiTokenInput"
+        type="password"
+        dir="ltr"
+        autocomplete="off"
+        placeholder="Read-only x-dashboard-token (in-memory)"
+        class="px-2.5 py-1 rounded-lg bg-[var(--card)] border border-amber-500/40 text-[var(--foreground)] text-xs font-mono w-48 focus:outline-none focus:border-amber-600"
+      />
+      <button onclick="connectOperatorDashboard()" class="px-2.5 py-1 rounded-lg bg-amber-600 text-white hover:bg-amber-700 transition cursor-pointer">
+        🔗 اتصال حي
+      </button>
+      <button onclick="loadLiveDashboard()" class="px-2.5 py-1 rounded-lg bg-[var(--card)] border border-amber-500/40 text-amber-700 hover:bg-amber-500/10 transition cursor-pointer">
+        🔄 إعادة المحاولة
+      </button>
+    </div>
   </div>
 
   <!-- Top Demo Director Bar -->
@@ -500,6 +521,19 @@
       const badge = document.getElementById('modeStatusBadge');
       if (banner) banner.classList.add('hidden');
       if (badge) badge.textContent = 'متصل بـ ClinicOS Dashboard API ✓';
+    }
+
+    function connectOperatorDashboard(urlArg, tokenArg) {
+      const urlEl = document.getElementById('operatorApiUrlInput');
+      const tokEl = document.getElementById('operatorApiTokenInput');
+      const nextUrl = String(urlArg !== undefined ? urlArg : (urlEl && urlEl.value ? urlEl.value : '')).trim();
+      const nextTok = String(tokenArg !== undefined ? tokenArg : (tokEl && tokEl.value ? tokEl.value : '')).trim();
+      if (nextUrl) DASHBOARD_CONFIG.apiUrl = nextUrl;
+      if (nextTok) DASHBOARD_CONFIG.apiToken = nextTok;
+      if (tokEl && Object.prototype.hasOwnProperty.call(tokEl, 'value')) {
+        tokEl.value = '';
+      }
+      return loadLiveDashboard();
     }
 
     async function loadLiveDashboard() {

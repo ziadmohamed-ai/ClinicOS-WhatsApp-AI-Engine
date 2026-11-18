@@ -173,6 +173,26 @@ function validateStructure(wfOrPath, customLabel) {
       promptExpr.includes('msgs.find(') && !promptExpr.includes('messages?.[0]'),
       `${rel}: Transcribe Voice prompt must resolve the actionable voice message via msgs.find(...) rather than hardcoding messages?.[0]`
     );
+    assert.strictEqual(
+      txVoiceNode.retryOnFail,
+      true,
+      `${rel}: Transcribe Voice must set retryOnFail: true`
+    );
+    assert.strictEqual(
+      txVoiceNode.maxTries,
+      3,
+      `${rel}: Transcribe Voice must set maxTries: 3, got ${JSON.stringify(txVoiceNode.maxTries)}`
+    );
+    assert.strictEqual(
+      txVoiceNode.waitBetweenTries,
+      2000,
+      `${rel}: Transcribe Voice must set waitBetweenTries: 2000, got ${JSON.stringify(txVoiceNode.waitBetweenTries)}`
+    );
+    assert.strictEqual(
+      txVoiceNode.onError,
+      'continueRegularOutput',
+      `${rel}: Transcribe Voice must set onError: "continueRegularOutput", got ${JSON.stringify(txVoiceNode.onError)}`
+    );
   }
   const saveTxNode = wf.nodes.find((n) => n.name === 'Save & Inject Transcript');
   if (saveTxNode) {
@@ -770,6 +790,48 @@ function runMainWorkflowAuditMutationTests(wf) {
     'Mutation 7 (reverted queryReplacement in Save & Inject Transcript) must be rejected'
   );
 
+  // Mutation 8 (H1): Transcribe Voice retryOnFail disabled or wrong maxTries/waitBetweenTries/onError
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      n.retryOnFail = false;
+      validateStructure(m, 'mutation-transcribe-no-retry');
+    },
+    /Transcribe Voice must set retryOnFail: true/,
+    'Mutation 8a (Transcribe Voice retryOnFail disabled) must be rejected'
+  );
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      n.maxTries = 2;
+      validateStructure(m, 'mutation-transcribe-maxtries');
+    },
+    /Transcribe Voice must set maxTries: 3/,
+    'Mutation 8b (Transcribe Voice maxTries != 3) must be rejected'
+  );
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      n.waitBetweenTries = 1000;
+      validateStructure(m, 'mutation-transcribe-wait');
+    },
+    /Transcribe Voice must set waitBetweenTries: 2000/,
+    'Mutation 8c (Transcribe Voice waitBetweenTries != 2000) must be rejected'
+  );
+  assert.throws(
+    () => {
+      const m = clone();
+      const n = m.nodes.find((n) => n.name === 'Transcribe Voice');
+      n.onError = 'stopWorkflow';
+      validateStructure(m, 'mutation-transcribe-onerror');
+    },
+    /Transcribe Voice must set onError: "continueRegularOutput"/,
+    'Mutation 8d (Transcribe Voice onError != continueRegularOutput) must be rejected'
+  );
+
   return 7;
 }
 
@@ -814,6 +876,57 @@ function validateDashboardApiContract(origWf, dashWf, opts = {}) {
     'YOUR_DASHBOARD_HEADER_AUTH_CREDENTIAL_ID',
     'Dashboard Webhook must bind httpHeaderAuth credential placeholder YOUR_DASHBOARD_HEADER_AUTH_CREDENTIAL_ID'
   );
+
+  // H5: Restricted CORS on Dashboard Webhook + Respond nodes (single configurable origin, never *, OPTIONS preflight)
+  const allowedOriginsExpr = String(wh.parameters?.options?.allowedOrigins ?? '').trim();
+  assert.ok(
+    allowedOriginsExpr.length > 0,
+    'Dashboard Webhook must configure options.allowedOrigins for restricted CORS and OPTIONS preflight'
+  );
+  assert.ok(
+    allowedOriginsExpr !== '*' && !/^\s*\*\s*$/.test(allowedOriginsExpr),
+    'Dashboard Webhook options.allowedOrigins must not allow wildcard "*" CORS origin'
+  );
+  assert.ok(
+    allowedOriginsExpr.includes('$env.CLINICOS_DASHBOARD_ORIGIN') &&
+      allowedOriginsExpr.includes('YOUR_DASHBOARD_ALLOWED_ORIGIN') &&
+      !/https?:\/\/[a-z0-9.-]+/i.test(allowedOriginsExpr),
+    `Dashboard Webhook options.allowedOrigins must read a single configurable origin from $env.CLINICOS_DASHBOARD_ORIGIN with placeholder YOUR_DASHBOARD_ALLOWED_ORIGIN (never hard-coded or "*"), got ${JSON.stringify(allowedOriginsExpr)}`
+  );
+
+  for (const respNodeName of ['Respond Dashboard JSON', 'Respond Bad Request']) {
+    const respNode = (dashWf.nodes || []).find((n) => n.name === respNodeName);
+    assert.ok(respNode && respNode.type === 'n8n-nodes-base.respondToWebhook', `Missing ${respNodeName} node`);
+    const entries = respNode.parameters?.options?.responseHeaders?.entries;
+    assert.ok(Array.isArray(entries) && entries.length > 0, `${respNodeName} must define options.responseHeaders.entries for restricted CORS`);
+    const byHeader = Object.fromEntries(entries.map((e) => [String(e?.name ?? '').toLowerCase(), String(e?.value ?? '').trim()]));
+    const acao = byHeader['access-control-allow-origin'] || '';
+    assert.ok(acao.length > 0, `${respNodeName} must set Access-Control-Allow-Origin response header`);
+    assert.ok(
+      acao !== '*' && !/^\s*\*\s*$/.test(acao),
+      `${respNodeName} must not return Access-Control-Allow-Origin: *`
+    );
+    assert.strictEqual(
+      acao,
+      allowedOriginsExpr,
+      `${respNodeName} Access-Control-Allow-Origin must match Dashboard Webhook configurable single origin expression`
+    );
+    const acam = byHeader['access-control-allow-methods'] || '';
+    assert.ok(
+      acam.includes('GET') && acam.includes('OPTIONS'),
+      `${respNodeName} Access-Control-Allow-Methods must include GET and OPTIONS, got ${JSON.stringify(acam)}`
+    );
+    const acah = byHeader['access-control-allow-headers'] || '';
+    assert.ok(
+      acah.toLowerCase().includes('x-dashboard-token'),
+      `${respNodeName} Access-Control-Allow-Headers must include x-dashboard-token, got ${JSON.stringify(acah)}`
+    );
+    assert.strictEqual(
+      byHeader['vary'],
+      'Origin',
+      `${respNodeName} must set Vary: Origin`
+    );
+  }
 
   const rawJson = JSON.stringify(dashWf);
   assert.ok(
@@ -1016,7 +1129,33 @@ function runDashboardApiMutationTests(origWf, dashWf) {
     'Dashboard Mutation 8 (>90-day range accepted) must be rejected'
   );
 
-  return 8;
+  // Mutation 9 (H5): wildcard "*" CORS on Dashboard Webhook options.allowedOrigins
+  assert.throws(
+    () => {
+      const m = clone();
+      const wh = m.nodes.find((n) => n.name === 'Dashboard Webhook');
+      wh.parameters.options = { ...(wh.parameters.options || {}), allowedOrigins: '*' };
+      validateDashboardApiContract(origWf, m);
+    },
+    /must not allow wildcard "\*" CORS origin/,
+    'Dashboard Mutation 9 (wildcard * in Webhook allowedOrigins) must be rejected'
+  );
+
+  // Mutation 10 (H5): Respond Dashboard JSON returning Access-Control-Allow-Origin: *
+  assert.throws(
+    () => {
+      const m = clone();
+      const resp = m.nodes.find((n) => n.name === 'Respond Dashboard JSON');
+      const entries = resp.parameters.options.responseHeaders.entries;
+      const originEntry = entries.find((e) => e.name === 'Access-Control-Allow-Origin');
+      originEntry.value = '*';
+      validateDashboardApiContract(origWf, m);
+    },
+    /must not return Access-Control-Allow-Origin: \*/,
+    'Dashboard Mutation 10 (Access-Control-Allow-Origin: * on Respond node) must be rejected'
+  );
+
+  return 10;
 }
 
 function main() {
