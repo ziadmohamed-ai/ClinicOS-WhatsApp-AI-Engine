@@ -999,7 +999,9 @@ begin
   insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600010', 'PatPending1755') returning id into v_p_pend;
   insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600011', 'PatAcked1755')   returning id into v_p_acked;
 
-  -- Security check: no l2v function may read l2v.test_now or current_setting (clock must be passed via p_at parameter)
+  -- Security check: no l2v function may read l2v.test_now or current_setting,
+  -- and public runtime functions (assign_lead, set_qualification, release_overnight, escalate_overdue)
+  -- must NOT accept a p_at clock-override parameter.
   assert not exists (
     select 1
       from pg_proc p
@@ -1008,18 +1010,27 @@ begin
        and (p.prosrc ilike '%test_now%' or p.prosrc ilike '%current_setting%')
   ), 'T11 security: l2v functions must not read l2v.test_now or current_setting';
 
+  assert not exists (
+    select 1
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'l2v'
+       and p.proname in ('assign_lead', 'set_qualification', 'release_overnight', 'escalate_overdue')
+       and 'p_at' = any(coalesce(p.proargnames, '{}'::text[]))
+  ), 'H3 security: public l2v runtime functions (assign_lead, set_qualification, release_overnight, escalate_overdue) must not accept p_at';
+
   -- (1) Assign both leads at 17:55 Cairo time (5 minutes before 18:00 close, SLA = 15 -> sla_due_at = 18:10)
   select * into v_lead_pend, v_new from l2v.capture_lead(v_clinic, v_p_pend, 'click_to_whatsapp', 'camp_close', null, null, '2026-11-17 17:55:00+02'::timestamptz);
-  select * into v_q_pend from l2v.set_qualification(v_lead_pend, 'high', 'now', 'زراعة', '2026-11-17 17:55:00+02'::timestamptz);
+  select * into v_q_pend from l2v._set_qualification_at(v_lead_pend, 'high', 'now', 'زراعة', '2026-11-17 17:55:00+02'::timestamptz);
   assert v_q_pend.status = 'hot' and v_q_pend.assignment_id is not null,
     'T11 closing-SLA: lead at 17:55 (before 18:00 close) must be assigned immediately';
 
   select * into v_lead_acked, v_new from l2v.capture_lead(v_clinic, v_p_acked, 'organic', null, null, null, '2026-11-17 17:55:00+02'::timestamptz);
-  select * into v_q_acked from l2v.set_qualification(v_lead_acked, 'high', 'now', 'تقويم', '2026-11-17 17:55:00+02'::timestamptz);
+  select * into v_q_acked from l2v._set_qualification_at(v_lead_acked, 'high', 'now', 'تقويم', '2026-11-17 17:55:00+02'::timestamptz);
   assert v_q_acked.status = 'hot' and v_q_acked.assignment_id is not null,
     'T11 closing-SLA: second lead at 17:55 must be assigned immediately';
 
-  -- Verify set_qualification with p_at = 17:55 set sla_due_at = 18:10 directly
+  -- Verify _set_qualification_at with p_at = 17:55 set sla_due_at = 18:10 directly
   assert (select sla_due_at from l2v.assignments where id = v_q_pend.assignment_id) = '2026-11-17 18:10:00+02'::timestamptz,
     'T11 closing-SLA: expected initial sla_due_at = 2026-11-17 18:10:00+02';
 
@@ -1033,8 +1044,8 @@ begin
   --     Pending assignment's sla_due_at (18:10 yesterday, which passed while closed)
   --     must be moved to 09:15 today (opening_time + 15m) once, idempotently,
   --     and must NOT be escalated at the 09:00 tick!
-  perform l2v.release_overnight('2026-11-18 09:00:00+02'::timestamptz);
-  v_esc := l2v.escalate_overdue('2026-11-18 09:00:00+02'::timestamptz);
+  perform l2v._release_overnight_at('2026-11-18 09:00:00+02'::timestamptz);
+  v_esc := l2v._escalate_overdue_at('2026-11-18 09:00:00+02'::timestamptz);
   assert v_esc = 0,
     'T11 closing-SLA: pending assignment from 17:55 (SLA 15, close 18:00) must NOT be escalated at 09:00 tick, got ' || v_esc;
 
@@ -1044,11 +1055,11 @@ begin
   assert (select status from l2v.assignments where id = v_q_pend.assignment_id) = 'pending',
     'T11 closing-SLA: assignment must remain pending at 09:00 tick';
 
-  -- Idempotency check at 09:05 tick: release_overnight() must not change sla_due_at again, and escalate_overdue() still 0
-  perform l2v.release_overnight('2026-11-18 09:05:00+02'::timestamptz);
+  -- Idempotency check at 09:05 tick: _release_overnight_at() must not change sla_due_at again, and _escalate_overdue_at() still 0
+  perform l2v._release_overnight_at('2026-11-18 09:05:00+02'::timestamptz);
   assert (select sla_due_at from l2v.assignments where id = v_q_pend.assignment_id) = '2026-11-18 09:15:00+02'::timestamptz,
     'T11 closing-SLA: moving sla_due_at to opening_time + sla_minutes must be idempotent';
-  assert l2v.escalate_overdue('2026-11-18 09:05:00+02'::timestamptz) = 0,
+  assert l2v._escalate_overdue_at('2026-11-18 09:05:00+02'::timestamptz) = 0,
     'T11 closing-SLA: pending assignment must not be escalated before 09:15 (at 09:05 tick)';
 
   -- Acked assignment check: completely unaffected (status = acked, sla_due_at unchanged at yesterday 18:10)
@@ -1059,8 +1070,8 @@ begin
     'T11 closing-SLA: acked assignment sla_due_at must be unaffected, got ' || v_acked_due;
 
   -- (3) After 09:15 (09:16 tick): if still not acked, it MUST be escalated now!
-  perform l2v.release_overnight('2026-11-18 09:16:00+02'::timestamptz);
-  v_esc := l2v.escalate_overdue('2026-11-18 09:16:00+02'::timestamptz);
+  perform l2v._release_overnight_at('2026-11-18 09:16:00+02'::timestamptz);
+  v_esc := l2v._escalate_overdue_at('2026-11-18 09:16:00+02'::timestamptz);
   assert v_esc = 1,
     'T11 closing-SLA: unacked assignment must be escalated after 09:15 (at 09:16 tick), got ' || v_esc;
   assert (select status from l2v.assignments where id = v_q_pend.assignment_id) = 'escalated',
@@ -1082,13 +1093,13 @@ begin
 
   insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600012', 'PatNullHours') returning id into v_p_null;
   select * into v_lead_null, v_new from l2v.capture_lead(v_clinic, v_p_null, 'organic', null, null, null, '2026-11-18 17:55:00+02'::timestamptz);
-  select * into v_q_null from l2v.set_qualification(v_lead_null, 'high', 'now', 'حشو', '2026-11-18 17:55:00+02'::timestamptz);
+  select * into v_q_null from l2v._set_qualification_at(v_lead_null, 'high', 'now', 'حشو', '2026-11-18 17:55:00+02'::timestamptz);
 
-  perform l2v.release_overnight('2026-11-19 09:00:00+02'::timestamptz);
+  perform l2v._release_overnight_at('2026-11-19 09:00:00+02'::timestamptz);
   select sla_due_at into v_null_due from l2v.assignments where id = v_q_null.assignment_id;
   assert v_null_due = '2026-11-18 18:10:00+02'::timestamptz,
     'T11 closing-SLA: null hours must preserve old behaviour (sla_due_at not moved)';
-  v_esc := l2v.escalate_overdue('2026-11-19 09:00:00+02'::timestamptz);
+  v_esc := l2v._escalate_overdue_at('2026-11-19 09:00:00+02'::timestamptz);
   assert v_esc = 1,
     'T11 closing-SLA: null hours overdue assignment must escalate immediately (old behaviour), got ' || v_esc;
 
@@ -1099,16 +1110,35 @@ set role anon;
 do $$ begin
   begin perform l2v.release_overnight(); raise exception 'anon called release_overnight';
   exception when insufficient_privilege then raise notice 'anon release_overnight denied'; end;
+  begin perform l2v.escalate_overdue(); raise exception 'anon called escalate_overdue';
+  exception when insufficient_privilege then null; end;
   begin perform l2v.is_clinic_open(gen_random_uuid()); raise exception 'anon called is_clinic_open';
   exception when insufficient_privilege then null; end;
+  begin perform l2v._assign_lead_at(gen_random_uuid()); raise exception 'anon called _assign_lead_at';
+  exception when insufficient_privilege then null; end;
+  begin perform l2v._set_qualification_at(gen_random_uuid(), 'high', 'now'); raise exception 'anon called _set_qualification_at';
+  exception when insufficient_privilege then null; end;
+  begin perform l2v._release_overnight_at(); raise exception 'anon called _release_overnight_at';
+  exception when insufficient_privilege then null; end;
+  begin perform l2v._escalate_overdue_at(); raise exception 'anon called _escalate_overdue_at';
+  exception when insufficient_privilege then raise notice 'anon all internal _*_at functions denied'; end;
 end $$;
 reset role;
 
 set role clinicos_api_owner;
 do $$ begin
   perform l2v.release_overnight();
+  perform l2v.escalate_overdue();
   perform l2v.is_clinic_open(gen_random_uuid());
-  raise notice 'runtime role release_overnight & is_clinic_open allowed';
+  begin perform l2v._assign_lead_at(gen_random_uuid()); raise exception 'runtime role called _assign_lead_at';
+  exception when insufficient_privilege then null; end;
+  begin perform l2v._set_qualification_at(gen_random_uuid(), 'high', 'now'); raise exception 'runtime role called _set_qualification_at';
+  exception when insufficient_privilege then null; end;
+  begin perform l2v._release_overnight_at(); raise exception 'runtime role called _release_overnight_at';
+  exception when insufficient_privilege then null; end;
+  begin perform l2v._escalate_overdue_at(); raise exception 'runtime role called _escalate_overdue_at';
+  exception when insufficient_privilege then raise notice 'runtime role denied on internal _*_at functions'; end;
+  raise notice 'runtime role release_overnight & is_clinic_open allowed, internal _*_at helpers denied: OK';
 end $$;
 reset role;
 
