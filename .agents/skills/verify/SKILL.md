@@ -27,3 +27,7 @@ Files changed: <list>
 ```
 
 If any step fails, fix it before opening the PR. Do not skip, weaken or delete a test to get green.
+
+## Prompt changes (`prompts/receptionist-system-prompt.xml`)
+
+After `node scripts/build_l2v_workflow.js`, also run `node evals/run_eval.js --dry` (offline, must print DRY RUN OK). Antigravity has no OpenAI key: state in the PR that the live eval was NOT run and must be run by the owner before and after (`OPENAI_API_KEY=... node evals/run_eval.js`). Never claim a prompt change "improves" replies without that comparison.

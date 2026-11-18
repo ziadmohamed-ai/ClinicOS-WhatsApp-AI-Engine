@@ -88,6 +88,10 @@ BEGIN
   INSERT INTO public.clinics (id, name, timezone, settings)
   VALUES (v_other_clinic, 'Foreign Clinic B', 'Africa/Cairo', '{}'::jsonb);
 
+  -- Upgrade v4: a clinic without settings.emergency_number must get NULL (never a guessed national number)
+  ASSERT (public.get_clinic_snapshot(v_other_clinic) -> 'emergency_number') = 'null'::jsonb,
+    'get_clinic_snapshot must return emergency_number = null when the clinic has not configured one';
+
   BEGIN
     PERFORM public.log_workflow_error('ClinicOS - Main Engine', 'exec-2', 'NodeB', 'TestError');
     RAISE EXCEPTION 'Expected log_workflow_error to fail when 2 clinics exist';
