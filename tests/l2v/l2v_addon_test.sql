@@ -999,24 +999,29 @@ begin
   insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600010', 'PatPending1755') returning id into v_p_pend;
   insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600011', 'PatAcked1755')   returning id into v_p_acked;
 
-  -- (1) Assign both leads at 17:55 Cairo time (5 minutes before 18:00 close, SLA = 15 -> sla_due_at = 18:10)
-  perform set_config('l2v.test_now', '2026-11-17 17:55:00+02', true);
+  -- Security check: no l2v function may read l2v.test_now or current_setting (clock must be passed via p_at parameter)
+  assert not exists (
+    select 1
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'l2v'
+       and (p.prosrc ilike '%test_now%' or p.prosrc ilike '%current_setting%')
+  ), 'T11 security: l2v functions must not read l2v.test_now or current_setting';
 
+  -- (1) Assign both leads at 17:55 Cairo time (5 minutes before 18:00 close, SLA = 15 -> sla_due_at = 18:10)
   select * into v_lead_pend, v_new from l2v.capture_lead(v_clinic, v_p_pend, 'click_to_whatsapp', 'camp_close', null, null, '2026-11-17 17:55:00+02'::timestamptz);
-  select * into v_q_pend from l2v.set_qualification(v_lead_pend, 'high', 'now', 'زراعة');
+  select * into v_q_pend from l2v.set_qualification(v_lead_pend, 'high', 'now', 'زراعة', '2026-11-17 17:55:00+02'::timestamptz);
   assert v_q_pend.status = 'hot' and v_q_pend.assignment_id is not null,
     'T11 closing-SLA: lead at 17:55 (before 18:00 close) must be assigned immediately';
 
   select * into v_lead_acked, v_new from l2v.capture_lead(v_clinic, v_p_acked, 'organic', null, null, null, '2026-11-17 17:55:00+02'::timestamptz);
-  select * into v_q_acked from l2v.set_qualification(v_lead_acked, 'high', 'now', 'تقويم');
+  select * into v_q_acked from l2v.set_qualification(v_lead_acked, 'high', 'now', 'تقويم', '2026-11-17 17:55:00+02'::timestamptz);
   assert v_q_acked.status = 'hot' and v_q_acked.assignment_id is not null,
     'T11 closing-SLA: second lead at 17:55 must be assigned immediately';
 
-  -- Ensure exact 17:55 assigned_at and 18:10 sla_due_at timestamps on both assignments
-  update l2v.assignments
-     set assigned_at = '2026-11-17 17:55:00+02'::timestamptz,
-         sla_due_at  = '2026-11-17 18:10:00+02'::timestamptz
-   where id in (v_q_pend.assignment_id, v_q_acked.assignment_id);
+  -- Verify set_qualification with p_at = 17:55 set sla_due_at = 18:10 directly
+  assert (select sla_due_at from l2v.assignments where id = v_q_pend.assignment_id) = '2026-11-17 18:10:00+02'::timestamptz,
+    'T11 closing-SLA: expected initial sla_due_at = 2026-11-17 18:10:00+02';
 
   -- Second assignment is acked before closing (17:58)
   update l2v.assignments
@@ -1028,10 +1033,8 @@ begin
   --     Pending assignment's sla_due_at (18:10 yesterday, which passed while closed)
   --     must be moved to 09:15 today (opening_time + 15m) once, idempotently,
   --     and must NOT be escalated at the 09:00 tick!
-  perform set_config('l2v.test_now', '2026-11-18 09:00:00+02', true);
-
-  perform l2v.release_overnight();
-  v_esc := l2v.escalate_overdue();
+  perform l2v.release_overnight('2026-11-18 09:00:00+02'::timestamptz);
+  v_esc := l2v.escalate_overdue('2026-11-18 09:00:00+02'::timestamptz);
   assert v_esc = 0,
     'T11 closing-SLA: pending assignment from 17:55 (SLA 15, close 18:00) must NOT be escalated at 09:00 tick, got ' || v_esc;
 
@@ -1042,11 +1045,10 @@ begin
     'T11 closing-SLA: assignment must remain pending at 09:00 tick';
 
   -- Idempotency check at 09:05 tick: release_overnight() must not change sla_due_at again, and escalate_overdue() still 0
-  perform set_config('l2v.test_now', '2026-11-18 09:05:00+02', true);
-  perform l2v.release_overnight();
+  perform l2v.release_overnight('2026-11-18 09:05:00+02'::timestamptz);
   assert (select sla_due_at from l2v.assignments where id = v_q_pend.assignment_id) = '2026-11-18 09:15:00+02'::timestamptz,
     'T11 closing-SLA: moving sla_due_at to opening_time + sla_minutes must be idempotent';
-  assert l2v.escalate_overdue() = 0,
+  assert l2v.escalate_overdue('2026-11-18 09:05:00+02'::timestamptz) = 0,
     'T11 closing-SLA: pending assignment must not be escalated before 09:15 (at 09:05 tick)';
 
   -- Acked assignment check: completely unaffected (status = acked, sla_due_at unchanged at yesterday 18:10)
@@ -1057,9 +1059,8 @@ begin
     'T11 closing-SLA: acked assignment sla_due_at must be unaffected, got ' || v_acked_due;
 
   -- (3) After 09:15 (09:16 tick): if still not acked, it MUST be escalated now!
-  perform set_config('l2v.test_now', '2026-11-18 09:16:00+02', true);
-  perform l2v.release_overnight();
-  v_esc := l2v.escalate_overdue();
+  perform l2v.release_overnight('2026-11-18 09:16:00+02'::timestamptz);
+  v_esc := l2v.escalate_overdue('2026-11-18 09:16:00+02'::timestamptz);
   assert v_esc = 1,
     'T11 closing-SLA: unacked assignment must be escalated after 09:15 (at 09:16 tick), got ' || v_esc;
   assert (select status from l2v.assignments where id = v_q_pend.assignment_id) = 'escalated',
@@ -1080,24 +1081,17 @@ begin
    where clinic_id = v_clinic;
 
   insert into public.contacts (clinic_id, phone_e164, name) values (v_clinic, '+201166600012', 'PatNullHours') returning id into v_p_null;
-  perform set_config('l2v.test_now', '2026-11-18 17:55:00+02', true);
   select * into v_lead_null, v_new from l2v.capture_lead(v_clinic, v_p_null, 'organic', null, null, null, '2026-11-18 17:55:00+02'::timestamptz);
-  select * into v_q_null from l2v.set_qualification(v_lead_null, 'high', 'now', 'حشو');
-  update l2v.assignments
-     set assigned_at = '2026-11-18 17:55:00+02'::timestamptz,
-         sla_due_at  = '2026-11-18 18:10:00+02'::timestamptz
-   where id = v_q_null.assignment_id;
+  select * into v_q_null from l2v.set_qualification(v_lead_null, 'high', 'now', 'حشو', '2026-11-18 17:55:00+02'::timestamptz);
 
-  perform set_config('l2v.test_now', '2026-11-19 09:00:00+02', true);
-  perform l2v.release_overnight();
+  perform l2v.release_overnight('2026-11-19 09:00:00+02'::timestamptz);
   select sla_due_at into v_null_due from l2v.assignments where id = v_q_null.assignment_id;
   assert v_null_due = '2026-11-18 18:10:00+02'::timestamptz,
     'T11 closing-SLA: null hours must preserve old behaviour (sla_due_at not moved)';
-  v_esc := l2v.escalate_overdue();
+  v_esc := l2v.escalate_overdue('2026-11-19 09:00:00+02'::timestamptz);
   assert v_esc = 1,
     'T11 closing-SLA: null hours overdue assignment must escalate immediately (old behaviour), got ' || v_esc;
 
-  perform set_config('l2v.test_now', '', true);
   raise notice 'T11 SLA across closing time (17:55 -> 09:00 not escalated -> 09:15+ escalated, acked unaffected, null hours old behaviour): OK';
 end $$;
 

@@ -65,6 +65,8 @@ function normalizeAr(str) {
 function humanizeWhatsAppText(s) {
   if (!s || typeof s !== "string") return "";
   return s
+    .replace(/<\/?(?:patient_message|reply_text|output_contract|human_voice|role_and_persona|grounding_and_facts|intents_and_rules|state_aware_replies|lead_signals)>/gi, "")
+    .replace(/^(?:رد مقترح|الرد المقترح|الإجابة|الرد)\s*[:：-]\s*/i, "")
     .replace(/[*_~`"#]+/g, "")
     .replace(/\s*[—–]\s*/g, " ")
     .replace(/فيزا\/ماستركارد/g, "فيزا أو ماستركارد")
@@ -114,7 +116,8 @@ const SERVICE_CODE_ALIAS_GROUPS = [
   ["TEETH_WHITENING", "LASER_WHITENING", "WHITENING"],
   ["LASER_SESSION", "LASER_HAIR_REMOVAL", "LASER"],
   ["DENTAL_CLEANING", "TEETH_CLEANING", "CLEANING"],
-  ["DENTAL_CHECKUP", "DENTAL_CONSULT", "CHECKUP"],
+  ["DENTAL_CHECKUP", "DENTAL_CONSULT", "CHECKUP", "INITIAL_CONSULT"],
+  ["FOLLOWUP_VISIT", "FOLLOW_UP", "FOLLOWUP"],
   ["HYDRAFACIAL", "HYDRA_FACIAL", "FACIAL"],
 ];
 function resolveCatalogServiceCode(rawCode, services) {
@@ -128,14 +131,15 @@ function resolveCatalogServiceCode(rawCode, services) {
 
 function detectServiceCodeFromText(normMsg, services) {
   if (!normMsg) return null;
-  if (/(تبييض|تبيض|ليزر اسنان|ليزر للاسنان|ليزر سنان|هوليود|whitening|bleaching)/i.test(normMsg)) return pickServiceCode(services, ["TEETH_WHITENING", "LASER_WHITENING"]);
-  if (/(هيدرافيشل|هيدرا فيشل|تنظيف بشره|تنضيف بشره|نضاره|hydrafacial|facial)/i.test(normMsg)) return pickServiceCode(services, ["HYDRAFACIAL", "DERM_CONSULT", "DERMA_CONSULT"]);
-  if (/(تنظيف اسنان|تنضيف اسنان|انظف اسنان|انضف اسنان|انظف سنان|انضف سنان|جير|تلميع|تنظيف اللثه|تنضيف اللثه|جلسه تنظيف|جلسه تنضيف|dental cleaning|scaling|teeth cleaning)/i.test(normMsg)) return pickServiceCode(services, ["DENTAL_CLEANING", "TEETH_CLEANING"]);
+  if (/(تبييض|تبيض|تفتيح اسنان|تفتيح الاسنان|ليزر اسنان|ليزر للاسنان|ليزر سنان|هوليود|whitening|bleaching)/i.test(normMsg)) return pickServiceCode(services, ["TEETH_WHITENING", "LASER_WHITENING"]);
+  if (/(هيدرافيشل|هيدرا فيشل|تنظيف بشره|تنضيف بشره|تنظيف عميق للبشره|جلسه نضاره|نضاره الوجه|نضاره|hydrafacial|facial)/i.test(normMsg)) return pickServiceCode(services, ["HYDRAFACIAL", "DERM_CONSULT", "DERMA_CONSULT"]);
+  if (/(تنظيف اسنان|تنضيف اسنان|انظف اسنان|انضف اسنان|انظف سنان|انضف سنان|ازاله جير|ازاله الجير|تنظيف جير|تنضيف جير|جير|تلميع|تنظيف اللثه|تنضيف اللثه|جلسه تنظيف|جلسه تنضيف|dental cleaning|scaling|teeth cleaning)/i.test(normMsg)) return pickServiceCode(services, ["DENTAL_CLEANING", "TEETH_CLEANING"]);
   if (/(تنظيف|تنضيف|انظف|انضف|cleaning)/i.test(normMsg) && !/(بشره|وجه|جلد|skin|face)/i.test(normMsg)) return pickServiceCode(services, ["DENTAL_CLEANING", "TEETH_CLEANING"]);
-  if (/(ليزر|laser|hair removal|ازاله شعر|ازاله الشعر)/i.test(normMsg) && !/(اسنان|سنان|سناني|اسناني|teeth|tooth)/i.test(normMsg)) return pickServiceCode(services, ["LASER_SESSION", "DERM_CONSULT", "DERMA_CONSULT"]);
-  if (/(جلديه|بشره|حب شباب|حساسيه|اكزيما|تصبغات|بوتوكس|فيلر|تساقط شعر|دكتور سامي|د سامي|سامي القحطاني|سامي العتيبي|derma|skin|acne|botox|filler|dr sami)/i.test(normMsg)) return pickServiceCode(services, ["DERM_CONSULT", "DERMA_CONSULT"]);
-  if (/(تقويم|orthodont|braces)/i.test(normMsg)) return pickServiceCode(services, ["ORTHO_CONSULT", "DENTAL_CHECKUP"]);
-  if (/(فحص اسنان|كشف اسنان|استشاره اسنان|وجع ضرس|الم ضرس|ضرس العقل|حشو|عصب|خلع|زراعه اسنان|تركيبات|طربوش|اسناني بتوجعني|ضرسي بيوجعني|dental checkup|toothache|tooth pain|cavity|root canal)/i.test(normMsg)) return pickServiceCode(services, ["DENTAL_CHECKUP"]);
+  if (/(ليزر|laser|hair removal|ازاله شعر|ازاله الشعر|فل بودي|بكيني|full body)/i.test(normMsg) && !/(اسنان|سنان|سناني|اسناني|teeth|tooth)/i.test(normMsg)) return pickServiceCode(services, ["LASER_SESSION", "DERM_CONSULT", "DERMA_CONSULT"]);
+  if (/(جلديه|بشره|حب شباب|حساسيه جلد|اكزيما|تصبغات|بوتوكس|فيلر|تساقط شعر|دكتور سامي|د سامي|سامي القحطاني|سامي العتيبي|derma|skin|acne|botox|filler|dr sami)/i.test(normMsg)) return pickServiceCode(services, ["DERM_CONSULT", "DERMA_CONSULT"]);
+  if (/(تقويم|orthodont|braces)/i.test(normMsg)) return pickServiceCode(services, ["ORTHO_CONSULT", "DENTAL_CHECKUP", "INITIAL_CONSULT"]);
+  if (/(زياره متابعه|كشف متابعه|مراجعه متابعه|اعاده كشف|follow\s*up visit)/i.test(normMsg)) return pickServiceCode(services, ["FOLLOWUP_VISIT", "DENTAL_CHECKUP", "INITIAL_CONSULT"]);
+  if (/(فحص اسنان|كشف اسنان|استشاره اسنان|كشف اولي|استشاره اوليه|وجع ضرس|الم ضرس|ضرس العقل|حشو|عصب|سحب عصب|علاج عصب|خلع|زراعه اسنان|زراعه ضرس|تركيبات|طربوش|تلبيسه|اسناني بتوجعني|ضرسي بيوجعني|dental checkup|initial consult|toothache|tooth pain|cavity|root canal)/i.test(normMsg)) return pickServiceCode(services, ["DENTAL_CHECKUP", "INITIAL_CONSULT"]);
   return null;
 }
 
@@ -358,7 +362,7 @@ const normMsg = normalizeAr(userMessage);
 const emergencyPattern = /(نزيف|ورم شديد|تورم شديد|مش قادر اتنفس|مش قادره اتنفس|لا استطيع التنفس|صعوبه في البلع|صعوبه في التنفس|اختناق|حادث|كسر فك|كسر في الفك|تسمم|ضيق تنفس|الم لا يحتمل مع ورم|فقدان وعي|اغماء|severe swelling|heavy bleeding|can't breathe|cannot breathe|difficulty swallowing|choking|jaw fracture|unconscious)/i;
 const handoffPattern = /(حولني لموظف|حولني للاستقبال|عايز اكلم موظف|عايز اكلم حد|ابغي موظف|ابي موظف|اكلم موظف|موظف بشري|خدمه العملاء|تقديم شكوي|عندي شكوي|مدير العياده|talk to a human|speak to receptionist|human agent|speak to someone|real person)/i;
 const medicalPattern = /(اخد مضاد حيوي|اخذ مضاد حيوي|اكتبلي دواء|اكتبلي مسكن|جرعه دواء|جرعه المضاد|بديل دواء|ينفع اخد دواء|علاج التهاب اللثه في البيت|what antibiotic should i take|prescribe medication|dosage of)/i;
-const promptInjectionPattern = /(ignore previous instructions|ignore all instructions|system prompt|developer message|انت الان مبرمج|انسي التعليمات السابقه|تجاهل التعليمات|اعطني البرومبت|شروطك البرمجيه)/i;
+const promptInjectionPattern = /(ignore previous instructions|ignore all instructions|forget previous instructions|disregard all instructions|system prompt|developer message|you are now a|act as dan|print your instructions|انت الان مبرمج|انسي التعليمات السابقه|انسي كل القواعد|تجاهل التعليمات|اعطني البرومبت|قولي البرومبت السري|شروطك البرمجيه)/i;
 
 const isHardEmergency = emergencyPattern.test(normMsg) || emergencyPattern.test(userMessage);
 const isHardHandoff = !isHardEmergency && (handoffPattern.test(normMsg) || handoffPattern.test(userMessage));
@@ -1179,7 +1183,7 @@ if (intent === "confirm_booking" || intent === "slot_selection") {
 }
 
 // Compound turn detection: if LLM returned faq, but patient explicitly asked to book or see slots in the same message
-if (intent === "faq" && /(عايز احجز|عاوز احجز|محتاج احجز|ابغي احجز|ابي احجز|احجزلي|ممكن احجز|عايز ميعاد|ابغي موعد|ايه المواعيد المتاحه|وش المواعيد المتاحه|book an appointment|available slots)/i.test(normMsg) && Boolean(service?.id)) {
+if (intent === "faq" && /(عايز احجز|عاوز احجز|محتاج احجز|ابغي احجز|ابي احجز|احجزلي|تقدر تحجزلي|ممكن احجز|عايز ميعاد|شوفلي ميعاد|شوفلي اقرب ميعاد|ابغي موعد|ابغي اقرب موعد|لو في ميعاد فاضي|ايه المواعيد المتاحه|وش المواعيد المتاحه|book an appointment|available slots)/i.test(normMsg) && Boolean(service?.id)) {
   intent = "booking_request";
   if (!rangeValid) {
     effectiveFrom = new Date(nowMs + 60 * 1000).toISOString();
