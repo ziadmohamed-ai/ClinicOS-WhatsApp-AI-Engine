@@ -295,7 +295,7 @@ $$;
 
 -- Is the clinic currently within configured l2v.settings working hours?
 -- Default NULL (no l2v.settings row, or open_time/close_time/open_days all NULL) = always open.
-create function l2v.is_clinic_open(p_clinic_id uuid, p_at timestamptz default null)
+create function l2v.is_clinic_open(p_clinic_id uuid, p_at timestamptz default now())
 returns boolean
 language plpgsql
 stable
@@ -330,7 +330,7 @@ begin
     return true;
   end if;
 
-  v_now        := coalesce(p_at, nullif(btrim(coalesce(current_setting('l2v.test_now', true), '')), '')::timestamptz, now());
+  v_now        := coalesce(p_at, now());
   v_local_ts   := v_now at time zone v_tz;
   v_local_dow  := extract(dow from v_local_ts)::smallint;
   v_local_time := v_local_ts::time;
@@ -359,7 +359,8 @@ $$;
 create function l2v._assign_lead_at(
   p_lead_id         uuid,
   p_exclude_rep_ids uuid[] default '{}',
-  p_sla_start_at    timestamptz default null
+  p_sla_start_at    timestamptz default null,
+  p_now             timestamptz default now()
 )
 returns uuid
 language plpgsql
@@ -408,7 +409,7 @@ begin
   select coalesce(max(a.attempt), 0) + 1 into v_attempt
     from l2v.assignments a where a.lead_id = p_lead_id;
 
-  v_now     := coalesce(nullif(btrim(coalesce(current_setting('l2v.test_now', true), '')), '')::timestamptz, now());
+  v_now     := coalesce(p_now, now());
   v_base_ts := coalesce(p_sla_start_at, v_now);
 
   insert into l2v.assignments (lead_id, rep_id, attempt, assigned_at, sla_due_at)
@@ -432,13 +433,17 @@ $$;
 
 -- Round-robin: the active rep assigned least recently gets the lead.
 -- Returns the assignment id, or null when no eligible rep is left.
-create function l2v.assign_lead(p_lead_id uuid, p_exclude_rep_ids uuid[] default '{}')
+create function l2v.assign_lead(
+  p_lead_id         uuid,
+  p_exclude_rep_ids uuid[] default '{}',
+  p_at              timestamptz default now()
+)
 returns uuid
 language sql
 security definer
 set search_path = ''
 as $$
-  select l2v._assign_lead_at(p_lead_id, p_exclude_rep_ids, null);
+  select l2v._assign_lead_at(p_lead_id, p_exclude_rep_ids, coalesce(p_at, now()), coalesce(p_at, now()));
 $$;
 
 -- Deterministic scoring. Hot (>= 70) leads are assigned immediately when the clinic is open;
@@ -448,7 +453,8 @@ create function l2v.set_qualification(
   p_lead_id     uuid,
   p_budget_band text,
   p_timing      text,
-  p_treatment   text default null
+  p_treatment   text default null,
+  p_at          timestamptz default now()
 )
 returns table (status text, score smallint, assignment_id uuid)
 language plpgsql
@@ -459,8 +465,10 @@ declare
   v_score     integer;
   v_status    text;
   v_clinic_id uuid;
+  v_now       timestamptz;
   v_assign    uuid;
 begin
+  v_now := coalesce(p_at, now());
   v_score :=
     case p_timing when 'now' then 60 when 'this_month' then 35 when 'later' then 10 else 0 end
   + case p_budget_band when 'high' then 40 when 'mid' then 25 when 'low' then 5 else 0 end;
@@ -482,8 +490,8 @@ begin
 
   if v_status = 'hot' then
     if not exists (select 1 from l2v.assignments a where a.lead_id = p_lead_id) then
-      if l2v.is_clinic_open(v_clinic_id) then
-        v_assign := l2v.assign_lead(p_lead_id);
+      if l2v.is_clinic_open(v_clinic_id, v_now) then
+        v_assign := l2v.assign_lead(p_lead_id, '{}'::uuid[], v_now);
       else
         v_assign := null;
       end if;
@@ -618,7 +626,7 @@ $$;
 -- while the clinic was closed to opening_time + sla_minutes (once, idempotent),
 -- and assigns all unassigned hot leads in round-robin order with SLA starting at
 -- the clinic's opening time (idempotent; skips closed clinics and leads whose patient already booked).
-create function l2v.release_overnight()
+create function l2v.release_overnight(p_at timestamptz default now())
 returns integer
 language plpgsql
 security definer
@@ -635,7 +643,7 @@ declare
   v_new      uuid;
   v_count    integer := 0;
 begin
-  v_now := coalesce(nullif(btrim(coalesce(current_setting('l2v.test_now', true), '')), '')::timestamptz, now());
+  v_now := coalesce(p_at, now());
 
   -- Move pending assignments whose sla_due_at passed while the clinic was closed
   -- to opening_time + sla_minutes (once per open window, idempotent).
@@ -705,7 +713,7 @@ begin
       v_open_at := v_now;
     end if;
 
-    v_new := l2v._assign_lead_at(r.lead_id, '{}'::uuid[], greatest(v_open_at, r.created_at));
+    v_new := l2v._assign_lead_at(r.lead_id, '{}'::uuid[], greatest(v_open_at, r.created_at), v_now);
     if v_new is not null then
       v_count := v_count + 1;
     end if;
@@ -719,7 +727,7 @@ $$;
 -- ensures pending assignments whose sla_due_at passed while closed are moved to
 -- opening_time + sla_minutes, then (while the clinic is open) moves overdue ones
 -- to the next rep and alerts the manager. Returns the number of escalated assignments.
-create function l2v.escalate_overdue()
+create function l2v.escalate_overdue(p_at timestamptz default now())
 returns integer
 language plpgsql
 security definer
@@ -732,7 +740,7 @@ declare
   v_to_name text;
   v_count   integer := 0;
 begin
-  v_now := coalesce(nullif(btrim(coalesce(current_setting('l2v.test_now', true), '')), '')::timestamptz, now());
+  v_now := coalesce(p_at, now());
 
   -- the AI receptionist already booked this patient: no rep action needed
   update l2v.assignments a
@@ -803,7 +811,8 @@ begin
 
     v_new := l2v.assign_lead(
       r.lead_id,
-      array(select x.rep_id from l2v.assignments x where x.lead_id = r.lead_id)
+      array(select x.rep_id from l2v.assignments x where x.lead_id = r.lead_id),
+      v_now
     );
 
     v_to_name := null;
@@ -1025,13 +1034,13 @@ begin
         l2v.is_clinic_open(uuid, timestamptz),
         l2v.capture_lead(uuid, uuid, text, text, text, jsonb, timestamptz),
         l2v.capture_lead_guarded(uuid, uuid, text, text, jsonb, timestamptz),
-        l2v.assign_lead(uuid, uuid[]),
-        l2v.set_qualification(uuid, text, text, text),
+        l2v.assign_lead(uuid, uuid[], timestamptz),
+        l2v.set_qualification(uuid, text, text, text, timestamptz),
         l2v.qualify_contact(uuid, uuid, text, text, text),
         l2v.rep_ack(uuid, text),
         l2v.close_lead(uuid, uuid),
-        l2v.release_overnight(),
-        l2v.escalate_overdue(),
+        l2v.release_overnight(timestamptz),
+        l2v.escalate_overdue(timestamptz),
         l2v.kpi_daily(uuid, date, date),
         l2v.recent_leads(uuid, integer)
         to %I', v_role);

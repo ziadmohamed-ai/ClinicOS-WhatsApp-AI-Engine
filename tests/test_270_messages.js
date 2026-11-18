@@ -2724,6 +2724,57 @@ addTest('T10 Dashboard UI: shows DEMO DATA banner when unconfigured or on API fa
   execFileSync(process.execPath, ['-e', asyncCheckScript], { stdio: 'pipe' });
 });
 
+addTest('Bootstrap Clinic Catalog: INITIAL_CONSULT and FOLLOWUP_VISIT resolve cleanly from Arabic/English text and AI aliases', 'Live Catalog Service Resolution', () => {
+  const bootstrapServices = [
+    { id: '7e12662b-9807-4267-8125-606263f2e4f5', code: 'INITIAL_CONSULT', price: 300, name_ar: 'كشف واستشارة أولية', name_en: 'Initial Consultation', duration_minutes: 30 },
+    { id: 'ba0006c8-6a6f-43e9-89a0-2022c15543d9', code: 'FOLLOWUP_VISIT', price: 150, name_ar: 'زيارة متابعة', name_en: 'Follow-up Visit', duration_minutes: 30 },
+  ];
+  const consultRes = runPipelineTurn({
+    inboundText: 'ضرسي بيوجعني وعايز احجز كشف بكرة',
+    aiOutput: { intent: 'booking_request', service_code: 'DENTAL_CHECKUP', dialect: 'ar-EG', confidence: 0.95, reply_text: 'ألف سلامة عليك، دي المواعيد المتاحة:' },
+    services: bootstrapServices,
+  });
+  assert.strictEqual(consultRes.parsed.should_query_slots, true);
+  assert.strictEqual(consultRes.parsed.service_code, 'INITIAL_CONSULT');
+
+  const followupRes = runPipelineTurn({
+    inboundText: 'عايز احجز زيارة متابعة بكرة',
+    aiOutput: { intent: 'booking_request', service_code: 'FOLLOW_UP', dialect: 'ar-EG', confidence: 0.95, reply_text: 'حاضر، دي مواعيد المتابعة:' },
+    services: bootstrapServices,
+  });
+  assert.strictEqual(followupRes.parsed.should_query_slots, true);
+  assert.strictEqual(followupRes.parsed.service_code, 'FOLLOWUP_VISIT');
+});
+
+addTest('Upgrade Hardening: strips leaked XML tags/prefixes and upgrades compound "شوفلي أقرب ميعاد" FAQ turns to booking_request', 'Lead-to-Visit', () => {
+  const res = runPipelineTurn({
+    inboundText: 'بكام إزالة الجير وشوفلي أقرب ميعاد فاضي',
+    aiOutput: {
+      intent: 'faq',
+      dialect: 'ar-EG',
+      confidence: 0.95,
+      reply_text: '<reply_text>رد مقترح: جلسة تنظيف وإزالة الجير بـ 250 ريال يا فندم</reply_text>',
+      lead_timing: 'now',
+      lead_budget_band: 'mid',
+    },
+  });
+  assert.strictEqual(res.parsed.intent, 'booking_request');
+  assert.strictEqual(res.parsed.should_query_slots, true);
+  assert.strictEqual(res.parsed.service_code, 'DENTAL_CLEANING');
+  assert.ok(!res.parsed.reply_text.includes('<reply_text>') && !res.parsed.reply_text.includes('رد مقترح'));
+});
+
+addTest('Security Hardening: database/05_lead_engine.sql has no l2v.test_now backdoor and .agents/agents/reviewer.md exists', 'Lead-to-Visit', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const repoRoot = path.resolve(__dirname, '..');
+  const sql05 = fs.readFileSync(path.join(repoRoot, 'database', '05_lead_engine.sql'), 'utf8');
+  assert.ok(!sql05.includes('test_now'), 'database/05_lead_engine.sql must not contain l2v.test_now');
+  assert.ok(!sql05.includes('current_setting'), 'database/05_lead_engine.sql must not use current_setting session GUC');
+  const reviewerPath = path.join(repoRoot, '.agents', 'agents', 'reviewer.md');
+  assert.ok(fs.existsSync(reviewerPath), '.agents/agents/reviewer.md must exist');
+});
+
 // ============================================================================
 // EXECUTE ALL 270 TESTS & REPORT SUMMARY
 // ============================================================================
