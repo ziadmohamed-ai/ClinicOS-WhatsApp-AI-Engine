@@ -6,12 +6,14 @@
 # Optional flags / env:
 #   --seed <path>          override seed SQL file (default: database/04_seed_data.sql)
 #   --clinic-id <uuid>     pass -v clinic_id=<uuid> to psql (default: 00000000-0000-4000-8000-000000000001)
+#   --rls-file <path>      override RLS SQL file (default: database/03_rls_policies.sql)
 #   CLINICOS_SKIP_02A=1    skip database/02a_live_sync_profile_and_slots.sql (mutation test)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SEED_OVERRIDE=""
 CLINIC_ID_ARG=""
+RLS_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -23,6 +25,10 @@ while [ $# -gt 0 ]; do
       CLINIC_ID_ARG="$2"
       shift 2
       ;;
+    --rls-file)
+      RLS_OVERRIDE="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 2
@@ -31,7 +37,7 @@ while [ $# -gt 0 ]; do
 done
 
 DEFAULT_RUN=0
-if [ -z "$SEED_OVERRIDE" ] && [ -z "$CLINIC_ID_ARG" ]; then
+if [ -z "$SEED_OVERRIDE" ] && [ -z "$CLINIC_ID_ARG" ] && [ -z "$RLS_OVERRIDE" ]; then
   DEFAULT_RUN=1
   CLINIC_ID_ARG="00000000-0000-4000-8000-000000000001"
 fi
@@ -79,6 +85,7 @@ if [ "$IS_WIN" -eq 1 ]; then
   EMPTY_SQL_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_empty.XXXXXX.sql")"
   EMPTY_SQL_PG="$(to_mixed_path "$EMPTY_SQL_POSIX")"
   NEW_SEED_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_new_clinic.XXXXXX.sql")"
+  NEW_RLS_03A_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_rls_03a.XXXXXX.sql")"
 else
   REPO_PG="$REPO"
   if [ "$(id -u)" = 0 ] && [ -d /var/lib/postgresql ]; then
@@ -93,6 +100,7 @@ else
   EMPTY_SQL_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_empty.XXXXXX.sql")"
   EMPTY_SQL_PG="$EMPTY_SQL_POSIX"
   NEW_SEED_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_new_clinic.XXXXXX.sql")"
+  NEW_RLS_03A_POSIX="$(mktemp "${TMPDIR:-/tmp}/clinicos_rls_03a.XXXXXX.sql")"
 fi
 
 echo "-- skipped 02a (CLINICOS_SKIP_02A=1)" > "$EMPTY_SQL_POSIX"
@@ -111,6 +119,16 @@ if [ -n "$SEED_OVERRIDE" ]; then
   fi
 else
   SEED_PG="$REPO_PG/database/04_seed_data.sql"
+fi
+
+if [ -n "$RLS_OVERRIDE" ]; then
+  if [ "$IS_WIN" -eq 1 ]; then
+    RLS_PG="$(to_mixed_path "$RLS_OVERRIDE")"
+  else
+    RLS_PG="$RLS_OVERRIDE"
+  fi
+else
+  RLS_PG="$REPO_PG/database/03_rls_policies.sql"
 fi
 
 run_pg() {
@@ -264,10 +282,10 @@ chmod 644 "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX" 2>/dev/null || true
 cleanup() {
   if [ "$IS_WIN" -eq 1 ]; then
     "$PGBIN/pg_ctl" -D "$WORK_PG" -m immediate stop </dev/null >/dev/null 2>&1 || true
-    rm -rf "$WORK_POSIX" "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX" "$NEW_SEED_POSIX"
+    rm -rf "$WORK_POSIX" "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX" "$NEW_SEED_POSIX" "$NEW_RLS_03A_POSIX"
   else
     run_pg "'$PGBIN/pg_ctl' -D '$WORK_PG' stop -m fast >/dev/null 2>&1 || true; rm -rf '$WORK_PG'"
-    rm -f "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX" "$NEW_SEED_POSIX"
+    rm -f "$WF_SQL_POSIX" "$EMPTY_SQL_POSIX" "$NEW_SEED_POSIX" "$NEW_RLS_03A_POSIX"
   fi
 }
 trap cleanup EXIT
@@ -276,7 +294,8 @@ if [ "$IS_WIN" -eq 1 ]; then
   "$PGBIN/initdb" -D "$WORK_PG" -U postgres -A trust --encoding=UTF8 --locale=C >/dev/null
   "$PGBIN/pg_ctl" -D "$WORK_PG" -l "$WORK_PG/log" -o "-p $PORT -h 127.0.0.1" -w start </dev/null >/dev/null 2>&1
 
-  # Verify database/03_rls_policies.sql fails with a clear error when clinic_id is missing
+  # Verify database/03_rls_policies.sql fails with a clear error when clinic_id is missing,
+  # and database/03a_rls_policies_template.sql fails when <CLINIC_UUID> placeholder is unreplaced
   if [ "$DEFAULT_RUN" -eq 1 ]; then
     set +e
     MISSING_ERR="$("$PGBIN/psql" -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$REPO_PG/database/03_rls_policies.sql" 2>&1)"
@@ -286,12 +305,22 @@ if [ "$IS_WIN" -eq 1 ]; then
       echo "ERROR: Expected 03_rls_policies.sql without -v clinic_id to fail clearly, got rc=$MISSING_RC: $MISSING_ERR" >&2
       exit 1
     fi
+
+    set +e
+    UNREPLACED_ERR="$("$PGBIN/psql" -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$REPO_PG/database/03a_rls_policies_template.sql" 2>&1)"
+    UNREPLACED_RC=$?
+    set -e
+    if [ "$UNREPLACED_RC" -eq 0 ] || ! printf '%s' "$UNREPLACED_ERR" | grep -q "Unreplaced placeholder <CLINIC_UUID>"; then
+      echo "ERROR: Expected 03a_rls_policies_template.sql with unreplaced <CLINIC_UUID> to fail clearly, got rc=$UNREPLACED_RC: $UNREPLACED_ERR" >&2
+      exit 1
+    fi
   fi
 
   "$PGBIN/psql" -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
     -v "clinic_id=$CLINIC_ID_ARG" \
     -v "repo=$REPO_PG" \
     -v "step_02a=$STEP_02A_PG" \
+    -v "rls_sql=$RLS_PG" \
     -v "seed_sql=$SEED_PG" \
     -v "wf_checks_sql=$WF_SQL_PG" \
     -f "$REPO_PG/tests/clean_install_test.sql"
@@ -307,22 +336,37 @@ else
       echo "ERROR: Expected 03_rls_policies.sql without -v clinic_id to fail clearly, got rc=$MISSING_RC: $MISSING_ERR" >&2
       exit 1
     fi
+
+    set +e
+    UNREPLACED_ERR="$(run_pg "'$PGBIN/psql' -h /tmp -p '$PORT' -d postgres -v ON_ERROR_STOP=1 -f '$REPO_PG/database/03a_rls_policies_template.sql'" 2>&1)"
+    UNREPLACED_RC=$?
+    set -e
+    if [ "$UNREPLACED_RC" -eq 0 ] || ! printf '%s' "$UNREPLACED_ERR" | grep -q "Unreplaced placeholder <CLINIC_UUID>"; then
+      echo "ERROR: Expected 03a_rls_policies_template.sql with unreplaced <CLINIC_UUID> to fail clearly, got rc=$UNREPLACED_RC: $UNREPLACED_ERR" >&2
+      exit 1
+    fi
   fi
 
-  run_pg "'$PGBIN/psql' -h /tmp -p '$PORT' -d postgres -v ON_ERROR_STOP=1 -v 'clinic_id=$CLINIC_ID_ARG' -v 'repo=$REPO_PG' -v 'step_02a=$STEP_02A_PG' -v 'seed_sql=$SEED_PG' -v 'wf_checks_sql=$WF_SQL_PG' -f '$REPO_PG/tests/clean_install_test.sql'"
+  run_pg "'$PGBIN/psql' -h /tmp -p '$PORT' -d postgres -v ON_ERROR_STOP=1 -v 'clinic_id=$CLINIC_ID_ARG' -v 'repo=$REPO_PG' -v 'step_02a=$STEP_02A_PG' -v 'rls_sql=$RLS_PG' -v 'seed_sql=$SEED_PG' -v 'wf_checks_sql=$WF_SQL_PG' -f '$REPO_PG/tests/clean_install_test.sql'"
 fi
 
-# On default run (when 02a is not skipped), exercise scripts/new_clinic.sh through a fresh clean install
+# On default run (when 02a is not skipped), exercise scripts/new_clinic.sh AND database/03a_rls_policies_template.sql
+# (with <CLINIC_UUID> replaced by the generated CLINIC_ID) through a fresh clean install
 if [ "$DEFAULT_RUN" -eq 1 ] && [ "${CLINICOS_SKIP_02A:-0}" != "1" ]; then
   NEW_OUT="$("${BASH:-sh}" "$REPO/scripts/new_clinic.sh" --name "عيادة النور التخصصية" --phone-number-id "YOUR_STAGING_PHONE_ID" --out "$NEW_SEED_POSIX")"
+  if ! printf '%s\n' "$NEW_OUT" | grep -q "03a_rls_policies_template.sql"; then
+    echo "ERROR: scripts/new_clinic.sh output did not mention database/03a_rls_policies_template.sql" >&2
+    exit 1
+  fi
   NEW_CLINIC_ID="$(printf '%s\n' "$NEW_OUT" | sed -n 's/^CLINIC_ID=//p' | tr -d '\r' | head -n 1)"
   if [ -z "$NEW_CLINIC_ID" ]; then
     echo "ERROR: scripts/new_clinic.sh did not emit CLINIC_ID" >&2
     exit 1
   fi
-  chmod 644 "$NEW_SEED_POSIX" 2>/dev/null || true
-  CLINICOS_CLEAN_PGPORT=$((PORT + 1)) "${BASH:-sh}" "$REPO/tests/clean_install_test.sh" --seed "$NEW_SEED_POSIX" --clinic-id "$NEW_CLINIC_ID"
-  echo "new_clinic.sh clean-install verification: OK"
+  sed "s/<CLINIC_UUID>/$NEW_CLINIC_ID/g" "$REPO/database/03a_rls_policies_template.sql" > "$NEW_RLS_03A_POSIX"
+  chmod 644 "$NEW_SEED_POSIX" "$NEW_RLS_03A_POSIX" 2>/dev/null || true
+  CLINICOS_CLEAN_PGPORT=$((PORT + 1)) "${BASH:-sh}" "$REPO/tests/clean_install_test.sh" --seed "$NEW_SEED_POSIX" --clinic-id "$NEW_CLINIC_ID" --rls-file "$NEW_RLS_03A_POSIX"
+  echo "new_clinic.sh + 03a_rls_policies_template.sql clean-install verification: OK"
 fi
 
 echo "Clean install test: OK"
